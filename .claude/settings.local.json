@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir *)",
+      "Bash(cd C:\\\\\\\\Develop\\\\\\\\im-archive-extension)",
+      "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\background.js\")",
+      "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\popup.js\")",
+      "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\singlefile-runner.js\")"
+    ]
+  }
+}

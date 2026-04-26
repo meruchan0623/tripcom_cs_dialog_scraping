@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=400, initial-scale=1.0">
+<title>IM会话归档助手</title>
+<style>
+  :root {
+    --primary: #1677ff;
+    --success: #52c41a;
+    --warning: #faad14;
+    --error: #ff4d4f;
+    --bg: #f5f5f5;
+    --card: #ffffff;
+    --text: #333;
+    --text2: #888;
+    --border: #e8e8e8;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    width: 100%;
+    min-width: 340px;
+    min-height: 480px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 12px;
+    font-size: 13px;
+  }
+
+  .header {
+    display:flex; align-items:center; gap:8px; margin-bottom:14px;
+  }
+  .header h1 {
+    font-size:16px; font-weight:700; color:var(--primary); flex:1;
+  }
+  .header .status-dot {
+    width:8px; height:8px; border-radius:50%; background:#ccc;
+  }
+  .header .status-dot.running { background:var(--success); animation:pulse 1s infinite; }
+  .header .status-dot.paused { background:var(--warning); }
+  .header .status-dot.error { background:var(--error); }
+
+  @keyframes pulse {
+    0%,100%{opacity:1} 50%{opacity:.4}
+  }
+
+  .card {
+    background:var(--card); border-radius:8px; padding:14px;
+    margin-bottom:10px; box-shadow:0 1px 3px rgba(0,0,0,.06);
+  }
+  .card-title {
+    font-size:13px; font-weight:600; color:var(--text2);
+    text-transform:uppercase; letter-spacing:.5px; margin-bottom:10px;
+  }
+
+  /* 进度面板 */
+  .progress-grid {
+    display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;
+  }
+  .stat-item {
+    text-align:center; padding:8px 6px; background:#fafafa;
+    border-radius:6px; border:1px solid var(--border);
+  }
+  .stat-num {
+    font-size:20px; font-weight:700; color:var(--primary); line-height:1.2;
+  }
+  .stat-label {
+    font-size:11px; color:var(--text2); margin-top:2px;
+  }
+
+  /* 当前任务 */
+  .current-task {
+    font-size:12px; color:var(--text2); line-height:1.6;
+    word-break:break-all;
+  }
+  .current-task strong { color:var(--text); }
+
+  /* 按钮 */
+  .btn-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .btn {
+    flex:1; min-width:70px; padding:9px 12px; border:none; border-radius:6px;
+    font-size:13px; font-weight:600; cursor:pointer; transition:all .15s;
+    text-align:center; color:#fff;
+  }
+  .btn-primary { background:var(--primary); }
+  .btn-primary:hover:not(:disabled) { background:#0958d9; }
+  .btn-success { background:var(--success); }
+  .btn-warning { background:var(--warning); color:#333; }
+  .btn-danger { background:var(--error); }
+  .btn-secondary { background:#d9d9d9; color:#333; }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+
+  /* 日志 */
+  .log-area {
+    max-height:160px; overflow-y:auto; background:#1e1e1e; color:#d4d4d4;
+    border-radius:6px; padding:10px; font-family:'Cascadia Code','Consolas',monospace;
+    font-size:11px; line-height:1.7; white-space:pre-wrap; word-break:break-all;
+  }
+  .log-area::-webkit-scrollbar { width:4px; }
+  .log-area::-webkit-scrollbar-thumb { background:#555; border-radius:2px; }
+
+  /* 格式选择 */
+  .format-row {
+    display:flex; align-items:center; gap:12px; margin-top:6px; margin-bottom:4px;
+    font-size:12px; color:var(--text2);
+  }
+  .format-row label { display:flex; align-items:center; gap:4px; cursor:pointer; }
+  .format-row input[type="checkbox"] { margin:0; cursor:pointer; }
+
+  /* 配置项 */
+  .config-row {
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:8px;
+  }
+  .config-row label { font-size:12px; color:var(--text2); }
+  .config-row input[type="number"] {
+    width:80px; padding:4px 8px; border:1px solid var(--border);
+    border-radius:4px; font-size:12px; text-align:right;
+  }
+
+  /* 页面状态 */
+  .page-status {
+    padding:8px 12px; border-radius:6px; font-size:12px;
+    display:flex; align-items:center; gap:6px;
+  }
+  .page-status.ok { background:#f6ffed; border:1px solid #b7eb8f; color:#389e0d; }
+  .page-status.err { background:#fff2f0; border:1px solid #ffccc7; color:#cf1322; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>📋 IM会话归档助手</h1>
+  <div id="statusDot" class="status-dot"></div>
+</div>
+
+<!-- 页面检测 -->
+<div class="card">
+  <div id="pageStatus" class="page-status err">
+    ⏳ 检测页面中...
+  </div>
+</div>
+
+<!-- 进度统计 -->
+<div class="card">
+  <div class="card-title">📊 归档进度</div>
+  <div class="progress-grid">
+    <div class="stat-item">
+      <div id="totalNum" class="stat-num">0</div>
+      <div class="stat-label">总计</div>
+    </div>
+    <div class="stat-item">
+      <div id="doneNum" class="stat-num">0</div>
+      <div class="stat-label">✅ 成功</div>
+    </div>
+    <div class="stat-item">
+      <div id="failNum" class="stat-num">0</div>
+      <div class="stat-label">❌ 失败</div>
+    </div>
+  </div>
+  
+  <!-- 当前处理 -->
+  <div id="currentTask" class="current-task" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+    等待开始...
+  </div>
+
+  <!-- 控制按钮 -->
+  <div class="btn-row">
+    <button id="btnCollect" class="btn btn-primary">1. 获取会话</button>
+  </div>
+  <div class="btn-row">
+    <button id="btnArchive" class="btn btn-success" disabled>SingleFile 归档</button>
+    <button id="btnExportStructured" class="btn btn-primary" disabled>导出结构化对话</button>
+  </div>
+  <div class="format-row" id="formatRow">
+    <span>格式:</span>
+    <label><input type="checkbox" id="fmtJson" checked> JSON</label>
+    <label><input type="checkbox" id="fmtMarkdown" checked> Markdown</label>
+  </div>
+  <div class="btn-row">
+    <button id="btnExportLinks" class="btn btn-secondary" disabled>导出链接表 (XLSX)</button>
+  </div>
+  <div class="btn-row">
+    <button id="btnPause" class="btn btn-warning" disabled style="display:none;">暂停</button>
+    <button id="btnResume" class="btn btn-success" disabled style="display:none;">恢复</button>
+    <button id="btnCancel" class="btn btn-danger" disabled>取消</button>
+  </div>
+  <div class="btn-row" style="margin-top:6px;">
+    <button id="btnClearData" class="btn btn-secondary">清空数据</button>
+    <button id="btnReset" class="btn btn-danger">重置插件</button>
+  </div>
+</div>
+
+<!-- 设置（可折叠） -->
+<div class="card">
+  <div id="configToggle" class="card-title" style="cursor:pointer;">⚙️ 高级设置 ▼</div>
+  <div id="configPanel" style="display:none;">
+    <div class="config-row">
+      <label>每页条数:</label>
+      <input type="number" id="cfgPageSize" value="100" min="10" max="200" step="10">
+    </div>
+    <div class="config-row">
+      <label>并发数:</label>
+      <input type="number" id="cfgConcurrency" value="2" min="1" max="20" step="1">
+    </div>
+    <div class="config-row">
+      <label>操作间隔(ms):</label>
+      <input type="number" id="cfgDelay" value="2000" min="500" max="10000" step="500">
+    </div>
+    <div class="config-row">
+      <label>文件名前缀:</label>
+      <input type="text" id="cfgPrefix" value="IM_Archive" style="width:120px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    </div>
+    <div class="config-row">
+      <label>输出路径:</label>
+      <input type="text" id="cfgOutputPath" placeholder="留空=默认下载目录" style="width:120px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;">
+    </div>
+  </div>
+</div>
+
+<!-- 实时日志 -->
+<div class="card" style="flex:1;">
+  <div class="card-title">📝 运行日志</div>
+  <pre id="logArea" class="log-area">等待启动...</pre>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
