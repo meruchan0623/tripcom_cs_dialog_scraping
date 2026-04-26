@@ -13,8 +13,8 @@ const DEFAULT_CONFIG = {
   outputPrefix: "IM_Archive",
   outputPath: "",
   delayBetweenPages: 120,
-  delayBetweenSaves: 800,
-  concurrency: 2
+  delayBetweenSaves: 1000,
+  concurrency: 200
 };
 
 let archiveState = {
@@ -75,6 +75,17 @@ function sleep(ms) {
 function makeDownloadFilename(basename) {
   const p = (archiveState.config.outputPath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   return p ? `${p}/${basename}` : basename;
+}
+
+function makeFilenameTimestamp(date = new Date()) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}_${ms}`;
 }
 
 function normalizeFilenamePart(text, fallback = "Unknown") {
@@ -331,26 +342,34 @@ async function extractSessionsForCustomer(tabId, csName) {
   return deduped;
 }
 
-// ─── 并发队列 ───
+// ─── 匀速放行队列 ───
 
-async function runConcurrentQueue(items, worker, getConcurrency) {
+async function runRateLimitedQueue(items, worker, getQuotaCount, getQuotaWindowMs) {
   let cursor = 0;
   const total = items.length;
   const running = new Set();
+  let lastStartAt = 0;
 
-  function next() {
-    while (cursor < total && running.size < getConcurrency() && !archiveState.cancelled) {
-      const index = cursor++;
-      const p = worker(items[index], index, total).catch(() => {}).finally(() => running.delete(p));
-      running.add(p);
+  while (cursor < total && !archiveState.cancelled) {
+    await waitWhilePaused();
+    const quotaCount = Math.max(1, getQuotaCount());
+    const quotaWindowMs = Math.max(1, getQuotaWindowMs());
+    const openIntervalMs = Math.max(1, Math.floor(quotaWindowMs / quotaCount));
+    const now = Date.now();
+    const waitMs = Math.max(0, lastStartAt + openIntervalMs - now);
+
+    if (lastStartAt > 0 && waitMs > 0) {
+      await sleep(waitMs);
     }
+
+    const index = cursor++;
+    lastStartAt = Date.now();
+    const p = worker(items[index], index, total).catch(() => {}).finally(() => running.delete(p));
+    running.add(p);
   }
 
-  while (cursor < total || running.size > 0) {
-    if (archiveState.cancelled) { if (running.size) await Promise.allSettled(running); break; }
-    await waitWhilePaused();
-    next();
-    if (running.size > 0) await Promise.race(running);
+  if (running.size > 0) {
+    await Promise.allSettled(running);
   }
 }
 
@@ -458,9 +477,11 @@ async function archiveCollectedSessions() {
   archiveState.lastOutputKind = "singlefile";
   await saveProgress();
   try {
-    const concurrency = archiveState.config.concurrency || 2;
-    await log(`=== SingleFile 归档: ${archiveState.totalSessions} 条, 并发 ${concurrency} ===`);
-    await runConcurrentQueue(archiveState.collectedSessions, async (sess, i, total) => {
+    const quotaCount = archiveState.config.concurrency || 1;
+    const quotaWindowMs = archiveState.config.delayBetweenSaves || 1000;
+    const openIntervalMs = Math.max(1, Math.floor(quotaWindowMs / quotaCount));
+    await log(`=== SingleFile 归档: ${archiveState.totalSessions} 条, 平均每 ${Math.round(quotaWindowMs / 1000)} 秒打开 ${quotaCount} 页, 匀速间隔约 ${openIntervalMs} ms ===`);
+    await runRateLimitedQueue(archiveState.collectedSessions, async (sess, i, total) => {
       await log(`[${i+1}/${total}] ${sess.sessionId}...`);
       const tab = await openDetailPage(sess.sessionId);
       if (!tab) { archiveState.failedSessions++; await log(`  ✗ 打开失败`); return; }
@@ -470,7 +491,7 @@ async function archiveCollectedSessions() {
         else { archiveState.failedSessions++; await log(`  ✗ 保存失败`); }
       } finally { await safeCloseTab(tab.id); }
       await updateAndPersist();
-    }, () => archiveState.config.concurrency || 2);
+    }, () => archiveState.config.concurrency || 1, () => archiveState.config.delayBetweenSaves || 1000);
     archiveState.lastOutputSummary = `成功 ${archiveState.completedSessions} / 失败 ${archiveState.failedSessions}`;
     await log(`=== 归档完成: ${archiveState.lastOutputSummary} ===`);
     await finishRun(archiveState.cancelled ? "ready" : "archived");
@@ -489,14 +510,17 @@ async function exportStructuredConversations() {
   if (!archiveState.collectedSessions.length) throw new Error("无可导出会话");
   const formats = archiveState.selectedStructuredFormats;
   if (!formats.length) throw new Error("未选择导出格式");
+  const markdownExportStamp = makeFilenameTimestamp();
   resetRunState("exporting_structured");
   archiveState.totalSessions = archiveState.collectedSessions.length;
   archiveState.lastOutputKind = "structured";
   await saveProgress();
   try {
-    const concurrency = archiveState.config.concurrency || 2;
-    await log(`=== 结构化导出: ${archiveState.totalSessions} 条, 并发 ${concurrency}, 格式 ${formats.join("+")} ===`);
-    await runConcurrentQueue(archiveState.collectedSessions, async (sess, i, total) => {
+    const quotaCount = archiveState.config.concurrency || 1;
+    const quotaWindowMs = archiveState.config.delayBetweenSaves || 1000;
+    const openIntervalMs = Math.max(1, Math.floor(quotaWindowMs / quotaCount));
+    await log(`=== 结构化导出: ${archiveState.totalSessions} 条, 平均每 ${Math.round(quotaWindowMs / 1000)} 秒打开 ${quotaCount} 页, 匀速间隔约 ${openIntervalMs} ms, 格式 ${formats.join("+")} ===`);
+    await runRateLimitedQueue(archiveState.collectedSessions, async (sess, i, total) => {
       await log(`[${i+1}/${total}] ${sess.sessionId}...`);
       const tab = await openDetailPage(sess.sessionId);
       if (!tab) { archiveState.failedSessions++; await log(`  ✗ 打开失败`); return; }
@@ -524,7 +548,7 @@ async function exportStructuredConversations() {
         if (formats.includes("markdown")) {
           const md = createMarkdownFromStructured({ sessionId: sess.sessionId, csName: sess.csName, detailUrl: DETAIL_BASE_URL + sess.sessionId }, data.messages);
           const url = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
-          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${safe}/${pfx}_${sess.sessionId}_${seq}.md`), saveAs: false });
+          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${safe}/${pfx}_${sess.sessionId}_${seq}_${markdownExportStamp}.md`), saveAs: false });
         }
         archiveState.completedSessions++;
       } catch (error) {
@@ -532,7 +556,7 @@ async function exportStructuredConversations() {
         await log(`  ✗ ${error.message}`);
       } finally { await safeCloseTab(tab.id); }
       await updateAndPersist();
-    }, () => archiveState.config.concurrency || 2);
+    }, () => archiveState.config.concurrency || 1, () => archiveState.config.delayBetweenSaves || 1000);
     archiveState.lastOutputSummary = `成功 ${archiveState.completedSessions} / 失败 ${archiveState.failedSessions}`;
     await log(`=== 导出完成: ${archiveState.lastOutputSummary} ===`);
     await finishRun(archiveState.cancelled ? "ready" : "exported");
