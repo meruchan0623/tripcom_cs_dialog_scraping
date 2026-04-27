@@ -13,8 +13,8 @@ const DEFAULT_CONFIG = {
   outputPrefix: "IM_Archive",
   outputPath: "",
   delayBetweenPages: 120,
-  delayBetweenSaves: 1000,
-  concurrency: 200
+  delayBetweenSaves: 30000,
+  concurrency: 20
 };
 
 let archiveState = {
@@ -30,6 +30,7 @@ let archiveState = {
   log: [],
   collectedSessions: [],
   availableCsRoles: [],
+  availableCsRoleStats: [],
   selectedCsRoles: [],
   selectedStructuredFormats: ["json", "markdown"],
   lastOutputKind: null,
@@ -37,18 +38,53 @@ let archiveState = {
   config: { ...DEFAULT_CONFIG }
 };
 
-function getUniqueCsRolesFromSessions(sessions) {
-  const roles = new Set();
+function normalizeCsRoleKey(name) {
+  return String(name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function buildCsRoleBuckets(sessions) {
+  const buckets = new Map();
   (sessions || []).forEach(s => {
-    const role = String(s?.csName || "").trim();
-    if (role) roles.add(role);
+    const raw = String(s?.csName || "").trim();
+    if (!raw) return;
+    const key = normalizeCsRoleKey(raw);
+    if (!key) return;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        key,
+        name: raw,
+        count: 0
+      });
+    }
+    const bucket = buckets.get(key);
+    bucket.count += 1;
+    // 更偏好保留去空格后的更短展示名，减少“张三 ”这类脏名出现概率
+    if (raw.length < bucket.name.length) {
+      bucket.name = raw;
+    }
   });
-  return Array.from(roles).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  return Array.from(buckets.values()).sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+}
+
+function getUniqueCsRolesFromSessions(sessions) {
+  return buildCsRoleBuckets(sessions).map(b => b.name);
+}
+
+function getCsRoleStatsFromSessions(sessions) {
+  return buildCsRoleBuckets(sessions).map(b => ({
+    name: b.name,
+    count: b.count
+  }));
 }
 
 function reconcileCsRoleSelections(preferSelectAll = false) {
   const available = getUniqueCsRolesFromSessions(archiveState.collectedSessions);
+  const stats = getCsRoleStatsFromSessions(archiveState.collectedSessions);
   archiveState.availableCsRoles = available;
+  archiveState.availableCsRoleStats = stats;
 
   const current = Array.isArray(archiveState.selectedCsRoles) ? archiveState.selectedCsRoles : [];
   const selected = current.filter(role => available.includes(role));
@@ -63,7 +99,8 @@ function reconcileCsRoleSelections(preferSelectAll = false) {
 function getFilteredSessionsForSelectedRoles() {
   const selected = new Set((archiveState.selectedCsRoles || []).map(v => String(v || "").trim()).filter(Boolean));
   if (!selected.size) return [];
-  return archiveState.collectedSessions.filter(s => selected.has(String(s?.csName || "").trim()));
+  const selectedKeys = new Set(Array.from(selected).map(name => normalizeCsRoleKey(name)));
+  return archiveState.collectedSessions.filter(s => selectedKeys.has(normalizeCsRoleKey(s?.csName || "")));
 }
 
 // ─── 持久化 ───
@@ -83,6 +120,9 @@ async function loadProgress() {
         : [],
       availableCsRoles: Array.isArray(data.archiveState.availableCsRoles)
         ? data.archiveState.availableCsRoles
+        : [],
+      availableCsRoleStats: Array.isArray(data.archiveState.availableCsRoleStats)
+        ? data.archiveState.availableCsRoleStats
         : [],
       selectedCsRoles: Array.isArray(data.archiveState.selectedCsRoles)
         ? data.archiveState.selectedCsRoles
@@ -176,6 +216,7 @@ function getStateSummary() {
     currentCsName: archiveState.currentCsName,
     collectedCount: archiveState.collectedSessions.length,
     availableCsRoles: archiveState.availableCsRoles,
+    availableCsRoleStats: archiveState.availableCsRoleStats,
     selectedCsRoles: archiveState.selectedCsRoles,
     readyToArchive: archiveState.collectedSessions.length > 0,
     selectedStructuredFormats: archiveState.selectedStructuredFormats,
@@ -559,6 +600,7 @@ async function collectSessionFlow({ tabId }) {
   archiveState.totalSessions = 0;
   archiveState.collectedSessions = [];
   archiveState.availableCsRoles = [];
+  archiveState.availableCsRoleStats = [];
   archiveState.selectedCsRoles = [];
   await saveProgress();
   try {
@@ -783,6 +825,7 @@ async function exportLinksWorkbook() {
 async function clearCollectedData() {
   archiveState.collectedSessions = [];
   archiveState.availableCsRoles = [];
+  archiveState.availableCsRoleStats = [];
   archiveState.selectedCsRoles = [];
   archiveState.totalSessions = 0;
   archiveState.completedSessions = 0;
@@ -800,7 +843,7 @@ async function resetAll() {
     phase: "idle", totalSessions: 0, completedSessions: 0, failedSessions: 0,
     currentSessionId: null, currentCsName: null,
     log: [], collectedSessions: [],
-    availableCsRoles: [], selectedCsRoles: [],
+    availableCsRoles: [], availableCsRoleStats: [], selectedCsRoles: [],
     selectedStructuredFormats: ["json", "markdown"],
     lastOutputKind: null, lastOutputSummary: null,
     config: { ...DEFAULT_CONFIG }
@@ -904,12 +947,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           ? msg.roles.map(v => String(v || "").trim()).filter(Boolean)
           : [];
         archiveState.availableCsRoles = available;
+        archiveState.availableCsRoleStats = getCsRoleStatsFromSessions(archiveState.collectedSessions);
         archiveState.selectedCsRoles = selected.filter(role => available.includes(role));
         await saveProgress();
         return {
           status: "ok",
           selectedCsRoles: archiveState.selectedCsRoles,
-          availableCsRoles: archiveState.availableCsRoles
+          availableCsRoles: archiveState.availableCsRoles,
+          availableCsRoleStats: archiveState.availableCsRoleStats
         };
       }
 

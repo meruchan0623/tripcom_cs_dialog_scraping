@@ -54,6 +54,16 @@ async function refreshState() {
 
 async function ensureContentScript(tabId) {
   try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = String(tab?.url || "");
+    if (!url.includes("vbooking.ctrip.com")) {
+      return false;
+    }
+  } catch (_) {
+    return false;
+  }
+
+  try {
     const resp = await chrome.tabs.sendMessage(tabId, { action: "ping" });
     if (resp && resp.status === "ok" && resp.data?.version === CONTENT_SCRIPT_VERSION) {
       return true;
@@ -181,6 +191,8 @@ function updateUI(state) {
 
 function renderRoleOptions(state) {
   const availableRoles = Array.isArray(state?.availableCsRoles) ? state.availableCsRoles : [];
+  const roleStats = Array.isArray(state?.availableCsRoleStats) ? state.availableCsRoleStats : [];
+  const statMap = new Map(roleStats.map(item => [String(item?.name || "").trim(), Number(item?.count || 0)]));
   const selectedRoles = new Set(Array.isArray(state?.selectedCsRoles) ? state.selectedCsRoles : []);
 
   if (!availableRoles.length) {
@@ -190,8 +202,11 @@ function renderRoleOptions(state) {
 
   const html = availableRoles.map(role => {
     const checked = selectedRoles.has(role) ? "checked" : "";
-    const escaped = escapeHtml(role);
-    return `<label><input type="checkbox" name="csRole" value="${escaped}" ${checked}> ${escaped}</label>`;
+    const escapedValue = escapeHtml(role);
+    const count = statMap.get(String(role).trim());
+    const label = count > 0 ? `${role} (${count})` : role;
+    const escapedLabel = escapeHtml(label);
+    return `<label><input type="checkbox" name="csRole" value="${escapedValue}" ${checked}> ${escapedLabel}</label>`;
   }).join("");
   els.roleList.innerHTML = html;
 
@@ -231,8 +246,8 @@ async function init() {
     const cfg = await chrome.runtime.sendMessage({ type: "getConfig" });
     if (cfg?.config) {
       document.getElementById("cfgPageSize").value = cfg.config.pageSize || 100;
-      document.getElementById("cfgConcurrency").value = cfg.config.concurrency || 200;
-      document.getElementById("cfgDelay").value = Math.max(1, Math.round((cfg.config.delayBetweenSaves || 1000) / 1000));
+      document.getElementById("cfgConcurrency").value = cfg.config.concurrency || 20;
+      document.getElementById("cfgDelay").value = Math.max(1, Math.round((cfg.config.delayBetweenSaves || 30000) / 1000));
       document.getElementById("cfgPrefix").value = cfg.config.outputPrefix || "IM_Archive";
       document.getElementById("cfgOutputPath").value = cfg.config.outputPath || "";
     }
@@ -244,6 +259,9 @@ async function init() {
 async function handleCollect() {
   try {
     const tab = await getActiveTab();
+    if (!tab?.url || !tab.url.includes("vbooking.ctrip.com")) {
+      throw new Error("请先切换到 vbooking.ctrip.com 的 IM 页面再执行获取会话");
+    }
     const ready = await ensureContentScript(tab.id);
     if (!ready) {
       throw new Error("当前页面仍是旧版脚本，请刷新供应商平台页面一次后重试");
@@ -408,8 +426,8 @@ function toggleConfig() {
 async function saveConfig() {
   const config = {
     pageSize: parseInt(document.getElementById("cfgPageSize").value, 10) || 100,
-    concurrency: Math.min(200, Math.max(1, parseInt(document.getElementById("cfgConcurrency").value, 10) || 200)),
-    delayBetweenSaves: Math.min(60000, Math.max(1000, (parseInt(document.getElementById("cfgDelay").value, 10) || 1) * 1000)),
+    concurrency: Math.min(200, Math.max(1, parseInt(document.getElementById("cfgConcurrency").value, 10) || 20)),
+    delayBetweenSaves: Math.min(60000, Math.max(1000, (parseInt(document.getElementById("cfgDelay").value, 10) || 30) * 1000)),
     outputPrefix: document.getElementById("cfgPrefix").value.trim() || "IM_Archive",
     outputPath: document.getElementById("cfgOutputPath").value.trim()
   };

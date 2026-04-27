@@ -26,3 +26,11 @@ temp/
 .env
 .env.local
 .env.*.local
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# CLI runtime data
+.im_archive/

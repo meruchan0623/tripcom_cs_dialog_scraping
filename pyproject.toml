@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "im-archive-cli"
+version = "0.1.0"
+description = "Trip.com IM archive automation CLI"
+requires-python = ">=3.10"
+dependencies = [
+  "undetected-chromedriver>=3.5.5",
+  "selenium>=4.24.0",
+  "websocket-client>=1.8.0",
+  "PyYAML>=6.0.1",
+  "openpyxl>=3.1.5",
+]
+
+[project.scripts]
+im-archive = "im_archive_cli.cli:main"
+imx = "im_archive_cli.imx_cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
