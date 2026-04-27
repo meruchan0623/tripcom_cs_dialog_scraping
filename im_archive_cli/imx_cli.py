@@ -66,6 +66,7 @@ def cmd_auth_login(cfg: AppConfig, logger) -> int:
 def cmd_run_collect(cfg: AppConfig, logger, page_size: int | None, max_pages: int | None) -> int:
     controller = _make_controller(cfg)
     controller.ensure_chrome(headed=False)
+    # 每次 collect 前同步节流配置到插件，确保 CLI 和 GUI 的默认节奏一致
     config_payload = {
         "concurrency": int(cfg.concurrency or 20),
         "delayBetweenSaves": int(max(1, int(cfg.window_sec or 20)) * 1000),

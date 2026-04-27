@@ -157,6 +157,7 @@ class CDPPluginController:
             "--no-default-browser-check",
             self.cfg.vbooking_url,
         ]
+        # 默认支持载入仓库内未打包扩展；如已在浏览器安装，可在 config.yaml 关闭该行为
         if bool(getattr(self.cfg, "load_unpacked_extension", True)):
             extension_arg = self._resolve_load_extension_arg()
             args.insert(2, f"--disable-extensions-except={extension_arg}")
@@ -167,6 +168,7 @@ class CDPPluginController:
         rt = ChromeRuntime(pid=proc.pid, port=0, started_at=time.time())
         self._save_runtime(rt)
         return rt
+
     def start_chrome(self, headed: bool = False, force_new: bool = False) -> ChromeRuntime:
         if self._is_cdp_alive() and not force_new:
             rt = self._load_runtime()
@@ -188,6 +190,7 @@ class CDPPluginController:
             "--no-default-browser-check",
             self.cfg.vbooking_url,
         ]
+        # 调试模式下同样可按配置选择是否载入未打包扩展
         if bool(getattr(self.cfg, "load_unpacked_extension", True)):
             extension_arg = self._resolve_load_extension_arg()
             args.insert(4, f"--disable-extensions-except={extension_arg}")
@@ -203,6 +206,7 @@ class CDPPluginController:
                 return rt
             time.sleep(0.2)
         raise RuntimeError("Chrome CDP 启动超时")
+
     def _resolve_load_extension_arg(self) -> str:
         """
         Resolve and sanitize extension directories for --load-extension.
@@ -383,6 +387,7 @@ class CDPPluginController:
 
         existing = _popup_targets()
         if existing:
+            # 复用已有 popup 页，避免每次调用都堆积一个 extension://.../popup.html
             keep = existing[0]
             extra_ids = [str(t.get("targetId")) for t in existing[1:] if t.get("targetId")]
             if extra_ids:

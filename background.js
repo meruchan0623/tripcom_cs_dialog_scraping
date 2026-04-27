@@ -13,6 +13,7 @@ const DEFAULT_CONFIG = {
   outputPrefix: "IM_Archive",
   outputPath: "",
   delayBetweenPages: 120,
+  // 默认节流窗口 20 秒，配合 concurrency=20，约 1 秒放行 1 个详情页
   delayBetweenSaves: 20000,
   concurrency: 20
 };
@@ -32,6 +33,7 @@ let archiveState = {
   availableCsRoles: [],
   availableCsRoleStats: [],
   selectedCsRoles: [],
+  // 默认仅导出 JSON，减少不必要的 markdown 文件产出
   selectedStructuredFormats: ["json"],
   lastOutputKind: null,
   lastOutputSummary: null,
@@ -859,6 +861,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     switch (msg.type) {
       case "start": {
         if (archiveState.running) return { status: "error", message: "已有任务运行中" };
+        // 优先使用调用方显式传入的 tabId，避免误用 popup 触发页的 sender.tab.id
         const parsedTabId = Number(msg?.tabId);
         const targetTabId = Number.isFinite(parsedTabId) && parsedTabId > 0 ? parsedTabId : sender.tab?.id;
         if (!targetTabId) return { status: "error", message: "缺少目标页面 tabId" };
