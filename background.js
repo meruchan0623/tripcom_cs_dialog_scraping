@@ -857,10 +857,14 @@ async function resetAll() {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   async function handleMsg() {
     switch (msg.type) {
-      case "start":
+      case "start": {
         if (archiveState.running) return { status: "error", message: "已有任务运行中" };
-        collectSessionFlow({ tabId: sender.tab?.id || msg.tabId }).catch(e => log("收集异常: " + e.message));
+        const parsedTabId = Number(msg?.tabId);
+        const targetTabId = Number.isFinite(parsedTabId) && parsedTabId > 0 ? parsedTabId : sender.tab?.id;
+        if (!targetTabId) return { status: "error", message: "缺少目标页面 tabId" };
+        collectSessionFlow({ tabId: targetTabId }).catch(e => log("收集异常: " + e.message));
         return { status: "ok" };
+      }
 
       case "archive":
       case "archiveSingleFile":
