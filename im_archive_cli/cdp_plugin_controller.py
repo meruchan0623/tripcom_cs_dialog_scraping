@@ -30,14 +30,41 @@ def _detect_chrome_binary(config_path: str) -> str:
             return str(p)
     candidates = [
         os.environ.get("CHROME_PATH", ""),
+        os.environ.get("EDGE_PATH", ""),
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/microsoft-edge",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Chromium\Application\chrome.exe",
     ]
     for c in candidates:
         if c and Path(c).exists():
             return c
-    raise RuntimeError("未找到 Chrome 可执行文件，请在 config.yaml 设置 chrome_path")
+    raise RuntimeError("未找到 Chrome/Edge 可执行文件，请在 config.yaml 设置 chrome_path")
+
+
+def _spawn_detached_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        creationflags = int(getattr(subprocess, "DETACHED_PROCESS", 0)) | int(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+        if creationflags:
+            kwargs["creationflags"] = creationflags
+    else:
+        kwargs["start_new_session"] = True
+    return kwargs
 
 
 def parse_extension_id_from_target_url(target_url: str) -> str:
@@ -133,13 +160,7 @@ class CDPPluginController:
         ]
         if not headed:
             args.append("--headless=new")
-        kwargs: dict[str, Any] = {
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "stdin": subprocess.DEVNULL,
-            "creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
-        }
-        proc = subprocess.Popen(args, **kwargs)  # noqa: S603
+        proc = subprocess.Popen(args, **_spawn_detached_kwargs())  # noqa: S603
         rt = ChromeRuntime(pid=proc.pid, port=0, started_at=time.time())
         self._save_runtime(rt)
         return rt
@@ -160,6 +181,7 @@ class CDPPluginController:
         args = [
             chrome,
             f"--remote-debugging-port={self.cfg.cdp_port}",
+            "--remote-allow-origins=*",
             f"--user-data-dir={profile}",
             f"--load-extension={extension_arg}",
             "--no-first-run",
@@ -167,13 +189,7 @@ class CDPPluginController:
         ]
         if not headed:
             args.append("--headless=new")
-        kwargs: dict[str, Any] = {
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "stdin": subprocess.DEVNULL,
-            "creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
-        }
-        proc = subprocess.Popen(args, **kwargs)  # noqa: S603
+        proc = subprocess.Popen(args, **_spawn_detached_kwargs())  # noqa: S603
         rt = ChromeRuntime(pid=proc.pid, port=self.cfg.cdp_port, started_at=time.time())
         self._save_runtime(rt)
         for _ in range(50):
@@ -340,8 +356,9 @@ class CDPPluginController:
 
     def _open_popup_and_get_page_ws(self, extension_id: str) -> str:
         browser = CDPClient(self._get_browser_ws_url())
+        popup_url = f"chrome-extension://{extension_id}/popup.html"
+        target_id = None
         try:
-            popup_url = f"chrome-extension://{extension_id}/popup.html"
             created = browser.call("Target.createTarget", {"url": popup_url})
             target_id = created.get("targetId")
             if not target_id:
@@ -349,9 +366,18 @@ class CDPPluginController:
         finally:
             browser.close()
 
-        for _ in range(40):
-            for t in self._list_targets():
-                if t.get("targetId") == target_id and t.get("type") == "page":
+        for _ in range(50):
+            targets = self._list_targets()
+            # Preferred: the exact target we just created
+            for t in targets:
+                if t.get("targetId") == target_id:
+                    ws = t.get("webSocketDebuggerUrl")
+                    if ws:
+                        return str(ws)
+            # Fallback: any popup.html page target for this extension
+            for t in targets:
+                url = str(t.get("url") or "")
+                if url.startswith(popup_url):
                     ws = t.get("webSocketDebuggerUrl")
                     if ws:
                         return str(ws)

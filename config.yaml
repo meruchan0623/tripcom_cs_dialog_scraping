@@ -13,7 +13,7 @@ output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
 cdp_port: 9222
-chrome_path: ""
+chrome_path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
 extension_dir: .
 extension_runtime_dir: .im_archive/runtime_extensions
 chrome_state_file: .im_archive/chrome_state.json

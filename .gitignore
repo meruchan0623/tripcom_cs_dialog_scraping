@@ -34,3 +34,4 @@ __pycache__/
 
 # CLI runtime data
 .im_archive/
+im_archive_cli.egg-info/
