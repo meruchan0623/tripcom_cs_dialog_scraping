@@ -3,7 +3,7 @@ state_file: .im_archive/state.json
 output_dir: .im_archive/output
 log_dir: .im_archive/logs
 failures_file: .im_archive/failures.jsonl
-vbooking_url: https://vbooking.ctrip.com/
+vbooking_url: https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience
 detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=
 page_size: 100
 max_pages: 50

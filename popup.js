@@ -29,6 +29,7 @@ const els = {
 };
 
 const CONTENT_SCRIPT_VERSION = "2026-04-20-api-bridge-v2";
+const TARGET_ENTRY_URL = "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience";
 
 const PHASE_LABELS = {
   idle: "空闲",
@@ -91,6 +92,38 @@ async function ensureContentScript(tabId) {
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForTabReady(tabId, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      const url = String(tab?.url || "");
+      if (url.includes("vbooking.ctrip.com") && tab.status === "complete") {
+        return tab;
+      }
+    } catch (_) {
+      // ignore and retry
+    }
+    await sleep(400);
+  }
+  return chrome.tabs.get(tabId);
+}
+
+async function resolveTargetTabForCollect() {
+  const active = await getActiveTab();
+  const activeUrl = String(active?.url || "");
+  if (active && activeUrl.includes("vbooking.ctrip.com")) {
+    return active;
+  }
+  showPageStatus(false, "当前不在目标页，正在自动打开抓取入口...");
+  const opened = await chrome.tabs.create({ url: TARGET_ENTRY_URL, active: true });
+  return waitForTabReady(opened.id);
 }
 
 function showPageStatus(ok, text) {
@@ -220,11 +253,8 @@ async function init() {
   const tab = await getActiveTab();
 
   if (!tab || !tab.url) {
-    showPageStatus(false, "无法获取当前标签页");
-    return;
-  }
-
-  if (tab.url.includes("vbooking.ctrip.com")) {
+    showPageStatus(false, "无法获取当前标签页，点击“获取会话”将自动打开抓取入口");
+  } else if (tab.url.includes("vbooking.ctrip.com")) {
     showPageStatus(true, "已检测到供应商平台");
     const ready = await ensureContentScript(tab.id);
     if (ready) {
@@ -233,13 +263,12 @@ async function init() {
       showPageStatus(true, "当前页面仍是旧版脚本，请刷新供应商平台页面一次完成升级");
     }
   } else if (tab.url.includes("chrome://") || tab.url.startsWith("chrome-extension://")) {
-    showPageStatus(false, "当前是浏览器内置页，请在供应商平台中使用");
-    els.btnCollect.disabled = true;
+    showPageStatus(false, "当前是浏览器内置页，点击“获取会话”将自动跳转抓取入口");
   } else {
-    showPageStatus(false, "当前不在供应商平台 (vbooking.ctrip.com)");
-    els.btnCollect.disabled = true;
+    showPageStatus(false, "当前不在抓取入口，点击“获取会话”将自动跳转");
   }
 
+  els.btnCollect.disabled = false;
   await refreshState();
 
   try {
@@ -258,10 +287,11 @@ async function init() {
 
 async function handleCollect() {
   try {
-    const tab = await getActiveTab();
-    if (!tab?.url || !tab.url.includes("vbooking.ctrip.com")) {
-      throw new Error("请先切换到 vbooking.ctrip.com 的 IM 页面再执行获取会话");
+    const tab = await resolveTargetTabForCollect();
+    if (!tab?.url || !String(tab.url).includes("vbooking.ctrip.com")) {
+      throw new Error("未能打开目标入口页，请手动打开后重试");
     }
+
     const ready = await ensureContentScript(tab.id);
     if (!ready) {
       throw new Error("当前页面仍是旧版脚本，请刷新供应商平台页面一次后重试");

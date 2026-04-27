@@ -14,7 +14,7 @@ class AppConfig:
     output_dir: str = ".im_archive/output"
     log_dir: str = ".im_archive/logs"
     failures_file: str = ".im_archive/failures.jsonl"
-    vbooking_url: str = "https://vbooking.ctrip.com/"
+    vbooking_url: str = "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience"
     detail_base_url: str = "https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId="
     page_size: int = 100
     max_pages: int = 50

@@ -154,9 +154,11 @@ class CDPPluginController:
         args = [
             chrome,
             f"--user-data-dir={profile}",
+            f"--disable-extensions-except={extension_arg}",
             f"--load-extension={extension_arg}",
             "--no-first-run",
             "--no-default-browser-check",
+            self.cfg.vbooking_url,
         ]
         if not headed:
             args.append("--headless=new")
@@ -183,9 +185,11 @@ class CDPPluginController:
             f"--remote-debugging-port={self.cfg.cdp_port}",
             "--remote-allow-origins=*",
             f"--user-data-dir={profile}",
+            f"--disable-extensions-except={extension_arg}",
             f"--load-extension={extension_arg}",
             "--no-first-run",
             "--no-default-browser-check",
+            self.cfg.vbooking_url,
         ]
         if not headed:
             args.append("--headless=new")
@@ -304,15 +308,16 @@ class CDPPluginController:
         return list(_json_get(self._targets_url))
 
     def _find_extension_id(self) -> str:
+        ext_id = self._find_extension_id_from_preferences()
+        if ext_id:
+            return ext_id
+
         targets = self._list_targets()
         for t in targets:
             url = str(t.get("url") or "")
             if not url.startswith("chrome-extension://"):
                 continue
             return parse_extension_id_from_target_url(url)
-        ext_id = self._find_extension_id_from_preferences()
-        if ext_id:
-            return ext_id
         raise RuntimeError("未发现扩展 target，请确认扩展已通过 --load-extension 加载")
 
     def _find_extension_id_from_preferences(self) -> str | None:
@@ -337,7 +342,7 @@ class CDPPluginController:
             state = int(meta.get("state") or 0)
             if state != 1:
                 continue
-            if location == 4 and path and any(root and root in path for root in extension_roots):
+            if path and any(root and root in path for root in extension_roots):
                 return str(ext_id)
         # fallback: any enabled unpacked extension
         for ext_id, meta in settings.items():
@@ -347,7 +352,7 @@ class CDPPluginController:
                 continue
             location = int(meta.get("location") or 0)
             state = int(meta.get("state") or 0)
-            if location == 4 and state == 1:
+            if location in (4, 8) and state == 1:
                 return str(ext_id)
         return None
 

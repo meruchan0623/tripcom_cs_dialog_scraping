@@ -33,7 +33,7 @@ tripcom_cs_dialog_scraping/
 2. 开启右上角「开发者模式」
 3. 点击「加载已解压的扩展程序」
 4. 选择当前项目根目录：`tripcom_cs_dialog_scraping`
-5. 打开 Trip.com 供应商平台 IM 会话详情页面
+5. 打开 Trip.com 供应商平台抓取入口页面：`https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience`
 6. 刷新页面，确保内容脚本完成注入
 7. 点击扩展图标，配置参数并启动归档
 
