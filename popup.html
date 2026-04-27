@@ -110,6 +110,58 @@
   .format-row label { display:flex; align-items:center; gap:4px; cursor:pointer; }
   .format-row input[type="checkbox"] { margin:0; cursor:pointer; }
 
+  .role-filter {
+    margin-top: 10px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fafafa;
+  }
+  .role-filter-title {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .role-filter-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .role-filter-btn {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #fff;
+    color: var(--text2);
+    font-size: 11px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .role-filter-btn:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+  }
+  .role-list {
+    max-height: 84px;
+    overflow-y: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+  .role-list label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .role-list-empty {
+    color: var(--text2);
+    font-size: 12px;
+  }
+
   /* 配置项 */
   .config-row {
     display:flex; align-items:center; justify-content:space-between;
@@ -172,6 +224,18 @@
   <div class="btn-row">
     <button id="btnCollect" class="btn btn-primary">1. 获取会话</button>
   </div>
+  <div class="role-filter">
+    <div class="role-filter-title">
+      <span>客服角色筛选（SingleFile/结构化导出）</span>
+      <div class="role-filter-actions">
+        <button id="btnSelectAllRoles" class="role-filter-btn" type="button">全选</button>
+        <button id="btnClearRoles" class="role-filter-btn" type="button">清空</button>
+      </div>
+    </div>
+    <div id="roleList" class="role-list">
+      <span class="role-list-empty">请先点击“获取会话”加载客服角色</span>
+    </div>
+  </div>
   <div class="btn-row">
     <button id="btnArchive" class="btn btn-success" disabled>SingleFile 归档</button>
     <button id="btnExportStructured" class="btn btn-primary" disabled>导出结构化对话</button>
@@ -183,6 +247,8 @@
   </div>
   <div class="btn-row">
     <button id="btnExportLinks" class="btn btn-secondary" disabled>导出链接表 (XLSX)</button>
+    <button id="btnImportLinks" class="btn btn-primary">导入链接表 (XLSX)</button>
+    <input id="inputImportLinks" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none;">
   </div>
   <div class="btn-row">
     <button id="btnPause" class="btn btn-warning" disabled style="display:none;">暂停</button>

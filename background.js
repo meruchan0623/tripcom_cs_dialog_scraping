@@ -29,11 +29,42 @@ let archiveState = {
   currentCsName: null,
   log: [],
   collectedSessions: [],
+  availableCsRoles: [],
+  selectedCsRoles: [],
   selectedStructuredFormats: ["json", "markdown"],
   lastOutputKind: null,
   lastOutputSummary: null,
   config: { ...DEFAULT_CONFIG }
 };
+
+function getUniqueCsRolesFromSessions(sessions) {
+  const roles = new Set();
+  (sessions || []).forEach(s => {
+    const role = String(s?.csName || "").trim();
+    if (role) roles.add(role);
+  });
+  return Array.from(roles).sort((a, b) => a.localeCompare(b, "zh-CN"));
+}
+
+function reconcileCsRoleSelections(preferSelectAll = false) {
+  const available = getUniqueCsRolesFromSessions(archiveState.collectedSessions);
+  archiveState.availableCsRoles = available;
+
+  const current = Array.isArray(archiveState.selectedCsRoles) ? archiveState.selectedCsRoles : [];
+  const selected = current.filter(role => available.includes(role));
+
+  if (preferSelectAll || !selected.length) {
+    archiveState.selectedCsRoles = [...available];
+  } else {
+    archiveState.selectedCsRoles = selected;
+  }
+}
+
+function getFilteredSessionsForSelectedRoles() {
+  const selected = new Set((archiveState.selectedCsRoles || []).map(v => String(v || "").trim()).filter(Boolean));
+  if (!selected.size) return [];
+  return archiveState.collectedSessions.filter(s => selected.has(String(s?.csName || "").trim()));
+}
 
 // ─── 持久化 ───
 
@@ -50,6 +81,12 @@ async function loadProgress() {
       collectedSessions: Array.isArray(data.archiveState.collectedSessions)
         ? data.archiveState.collectedSessions
         : [],
+      availableCsRoles: Array.isArray(data.archiveState.availableCsRoles)
+        ? data.archiveState.availableCsRoles
+        : [],
+      selectedCsRoles: Array.isArray(data.archiveState.selectedCsRoles)
+        ? data.archiveState.selectedCsRoles
+        : [],
       selectedStructuredFormats: Array.isArray(data.archiveState.selectedStructuredFormats)
         ? data.archiveState.selectedStructuredFormats
         : ["json", "markdown"],
@@ -63,6 +100,7 @@ async function loadProgress() {
     if (archiveState.phase.startsWith("cancelling_")) {
       archiveState.phase = archiveState.collectedSessions.length ? "ready" : "idle";
     }
+    reconcileCsRoleSelections(false);
   }
 }
 
@@ -137,6 +175,8 @@ function getStateSummary() {
     currentSessionId: archiveState.currentSessionId,
     currentCsName: archiveState.currentCsName,
     collectedCount: archiveState.collectedSessions.length,
+    availableCsRoles: archiveState.availableCsRoles,
+    selectedCsRoles: archiveState.selectedCsRoles,
     readyToArchive: archiveState.collectedSessions.length > 0,
     selectedStructuredFormats: archiveState.selectedStructuredFormats,
     lastOutputKind: archiveState.lastOutputKind,
@@ -297,6 +337,121 @@ function uint8ArrayToBase64(bytes) {
   return btoa(b);
 }
 
+function base64ToUint8Array(base64) {
+  const binary = atob(base64 || "");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function unescapeXml(text) {
+  return String(text || "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function columnLettersToIndex(ref) {
+  const letters = String(ref || "").match(/[A-Z]+/i)?.[0] || "";
+  let idx = 0;
+  for (let i = 0; i < letters.length; i++) {
+    idx = idx * 26 + (letters.toUpperCase().charCodeAt(i) - 64);
+  }
+  return Math.max(0, idx - 1);
+}
+
+function parseWorksheetRows(xml) {
+  const rows = [];
+  const rowMatches = xml.match(/<row\b[\s\S]*?<\/row>/g) || [];
+  for (const rowXml of rowMatches) {
+    const row = [];
+    const cellMatches = rowXml.match(/<c\b[\s\S]*?<\/c>/g) || [];
+    for (const cellXml of cellMatches) {
+      const refMatch = cellXml.match(/\br="([A-Z]+\d+)"/i);
+      const colIdx = columnLettersToIndex(refMatch?.[1] || "");
+
+      let value = "";
+      const inlineMatch = cellXml.match(/<is>\s*<t[^>]*>([\s\S]*?)<\/t>\s*<\/is>/i);
+      const valueMatch = cellXml.match(/<v>([\s\S]*?)<\/v>/i);
+      if (inlineMatch) value = unescapeXml(inlineMatch[1]);
+      else if (valueMatch) value = unescapeXml(valueMatch[1]);
+
+      row[colIdx] = value;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeImportedSession(raw, fallbackIndex = 0) {
+  const sessionIdFromLink = String(raw.detailUrl || "").match(/[?&]sessionId=([^&#]+)/i)?.[1] || "";
+  const sessionId = String(raw.sessionId || sessionIdFromLink).trim();
+  if (!sessionId) return null;
+  return {
+    sessionId,
+    csName: String(raw.csName || "Unknown").trim() || "Unknown",
+    createTime: String(raw.createTime || "").trim(),
+    detailUrl: raw.detailUrl || `${DETAIL_BASE_URL}${sessionId}`,
+    imported: true,
+    seq: fallbackIndex + 1
+  };
+}
+
+async function parseImportedLinksWorkbook(base64) {
+  const bytes = base64ToUint8Array(base64);
+  const zip = await JSZip.loadAsync(bytes);
+  const worksheetFiles = Object.keys(zip.files)
+    .filter(name => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, "en"));
+  if (!worksheetFiles.length) throw new Error("xlsx 中未找到工作表");
+
+  const sessions = [];
+  for (const sheetPath of worksheetFiles) {
+    const xml = await zip.file(sheetPath).async("string");
+    const rows = parseWorksheetRows(xml);
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] || [];
+      const rowValues = row.map(v => String(v || "").trim());
+      if (!rowValues.some(Boolean)) continue;
+      const sessionIdCell = String(row[1] || "").trim();
+      const csNameCell = String(row[2] || "").trim();
+      const createTimeCell = String(row[3] || "").trim();
+      const detailUrlCell = String(row[4] || "").trim();
+
+      // 跳过标题行
+      if (/会话ID/i.test(sessionIdCell) || /详情页链接/i.test(detailUrlCell)) continue;
+
+      const parsed = normalizeImportedSession({
+        sessionId: sessionIdCell,
+        csName: csNameCell,
+        createTime: createTimeCell,
+        detailUrl: detailUrlCell
+      }, sessions.length);
+      if (parsed) sessions.push(parsed);
+    }
+  }
+
+  return dedupeSessions(sessions);
+}
+
+function buildImportPreview(sessions) {
+  const grouped = {};
+  sessions.forEach(s => {
+    const csName = String(s?.csName || "Unknown").trim() || "Unknown";
+    grouped[csName] = (grouped[csName] || 0) + 1;
+  });
+  const roleEntries = Object.entries(grouped)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))
+    .map(([csName, count]) => ({ csName, count }));
+  return {
+    totalSessions: sessions.length,
+    totalRoles: roleEntries.length,
+    roles: roleEntries
+  };
+}
+
 // ─── Markdown 生成 ───
 
 function createMarkdownFromStructured(meta, messages) {
@@ -403,6 +558,8 @@ async function collectSessionFlow({ tabId }) {
   resetRunState("collecting");
   archiveState.totalSessions = 0;
   archiveState.collectedSessions = [];
+  archiveState.availableCsRoles = [];
+  archiveState.selectedCsRoles = [];
   await saveProgress();
   try {
     await log("=== 开始获取 session_id 列表 ===");
@@ -458,6 +615,7 @@ async function collectSessionFlow({ tabId }) {
 
     archiveState.collectedSessions = dedupeSessions(archiveState.collectedSessions);
     archiveState.totalSessions = archiveState.collectedSessions.length;
+    reconcileCsRoleSelections(true);
     await log(`=== 收集完成: ${archiveState.collectedSessions.length} 条 ===`);
     await finishRun(archiveState.cancelled ? (archiveState.collectedSessions.length ? "ready" : "idle") : "ready");
   } catch (error) {
@@ -472,8 +630,10 @@ async function collectSessionFlow({ tabId }) {
 
 async function archiveCollectedSessions() {
   if (!archiveState.collectedSessions.length) throw new Error("无可归档会话");
+  const selectedSessions = getFilteredSessionsForSelectedRoles();
+  if (!selectedSessions.length) throw new Error("未选中任何客服角色或所选角色下无会话");
   resetRunState("archiving_singlefile");
-  archiveState.totalSessions = archiveState.collectedSessions.length;
+  archiveState.totalSessions = selectedSessions.length;
   archiveState.lastOutputKind = "singlefile";
   await saveProgress();
   try {
@@ -481,7 +641,7 @@ async function archiveCollectedSessions() {
     const quotaWindowMs = archiveState.config.delayBetweenSaves || 1000;
     const openIntervalMs = Math.max(1, Math.floor(quotaWindowMs / quotaCount));
     await log(`=== SingleFile 归档: ${archiveState.totalSessions} 条, 平均每 ${Math.round(quotaWindowMs / 1000)} 秒打开 ${quotaCount} 页, 匀速间隔约 ${openIntervalMs} ms ===`);
-    await runRateLimitedQueue(archiveState.collectedSessions, async (sess, i, total) => {
+    await runRateLimitedQueue(selectedSessions, async (sess, i, total) => {
       await log(`[${i+1}/${total}] ${sess.sessionId}...`);
       const tab = await openDetailPage(sess.sessionId);
       if (!tab) { archiveState.failedSessions++; await log(`  ✗ 打开失败`); return; }
@@ -508,11 +668,13 @@ async function archiveCollectedSessions() {
 
 async function exportStructuredConversations() {
   if (!archiveState.collectedSessions.length) throw new Error("无可导出会话");
+  const selectedSessions = getFilteredSessionsForSelectedRoles();
+  if (!selectedSessions.length) throw new Error("未选中任何客服角色或所选角色下无会话");
   const formats = archiveState.selectedStructuredFormats;
   if (!formats.length) throw new Error("未选择导出格式");
   const markdownExportStamp = makeFilenameTimestamp();
   resetRunState("exporting_structured");
-  archiveState.totalSessions = archiveState.collectedSessions.length;
+  archiveState.totalSessions = selectedSessions.length;
   archiveState.lastOutputKind = "structured";
   await saveProgress();
   try {
@@ -520,7 +682,7 @@ async function exportStructuredConversations() {
     const quotaWindowMs = archiveState.config.delayBetweenSaves || 1000;
     const openIntervalMs = Math.max(1, Math.floor(quotaWindowMs / quotaCount));
     await log(`=== 结构化导出: ${archiveState.totalSessions} 条, 平均每 ${Math.round(quotaWindowMs / 1000)} 秒打开 ${quotaCount} 页, 匀速间隔约 ${openIntervalMs} ms, 格式 ${formats.join("+")} ===`);
-    await runRateLimitedQueue(archiveState.collectedSessions, async (sess, i, total) => {
+    await runRateLimitedQueue(selectedSessions, async (sess, i, total) => {
       await log(`[${i+1}/${total}] ${sess.sessionId}...`);
       const tab = await openDetailPage(sess.sessionId);
       if (!tab) { archiveState.failedSessions++; await log(`  ✗ 打开失败`); return; }
@@ -620,6 +782,8 @@ async function exportLinksWorkbook() {
 
 async function clearCollectedData() {
   archiveState.collectedSessions = [];
+  archiveState.availableCsRoles = [];
+  archiveState.selectedCsRoles = [];
   archiveState.totalSessions = 0;
   archiveState.completedSessions = 0;
   archiveState.failedSessions = 0;
@@ -636,6 +800,7 @@ async function resetAll() {
     phase: "idle", totalSessions: 0, completedSessions: 0, failedSessions: 0,
     currentSessionId: null, currentCsName: null,
     log: [], collectedSessions: [],
+    availableCsRoles: [], selectedCsRoles: [],
     selectedStructuredFormats: ["json", "markdown"],
     lastOutputKind: null, lastOutputSummary: null,
     config: { ...DEFAULT_CONFIG }
@@ -673,6 +838,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         exportLinksWorkbook().catch(e => log("导出异常: " + e.message));
         return { status: "ok" };
 
+      case "importLinksWorkbook":
+        if (archiveState.running) return { status: "error", message: "任务运行中，无法导入" };
+        if (!msg.base64 || typeof msg.base64 !== "string") return { status: "error", message: "缺少 xlsx 文件内容" };
+        try {
+          const importedSessions = await parseImportedLinksWorkbook(msg.base64);
+          if (!importedSessions.length) {
+            return { status: "error", message: "未从 xlsx 中解析到有效会话" };
+          }
+          archiveState.collectedSessions = importedSessions;
+          archiveState.totalSessions = importedSessions.length;
+          archiveState.completedSessions = 0;
+          archiveState.failedSessions = 0;
+          archiveState.phase = "ready";
+          archiveState.lastOutputKind = "imported_links";
+          archiveState.lastOutputSummary = `已导入 ${importedSessions.length} 条会话`;
+          reconcileCsRoleSelections(true);
+          await log(`=== 已导入链接表: ${msg.filename || "links.xlsx"}，共 ${importedSessions.length} 条会话 ===`);
+          return { status: "ok", message: `导入成功：${importedSessions.length} 条会话` };
+        } catch (error) {
+          return { status: "error", message: `导入失败: ${error.message}` };
+        }
+
+      case "importLinksWorkbookPreview":
+        if (!msg.base64 || typeof msg.base64 !== "string") return { status: "error", message: "缺少 xlsx 文件内容" };
+        try {
+          const importedSessions = await parseImportedLinksWorkbook(msg.base64);
+          if (!importedSessions.length) {
+            return { status: "error", message: "未从 xlsx 中解析到有效会话" };
+          }
+          return { status: "ok", preview: buildImportPreview(importedSessions) };
+        } catch (error) {
+          return { status: "error", message: `预览失败: ${error.message}` };
+        }
+
       case "pause":
         archiveState.paused = true; await log("已暂停");
         return { status: "ok" };
@@ -698,6 +897,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           archiveState.selectedStructuredFormats = msg.formats.filter(f => f === "json" || f === "markdown");
         await saveProgress();
         return { status: "ok", formats: archiveState.selectedStructuredFormats };
+
+      case "setSelectedCsRoles": {
+        const available = getUniqueCsRolesFromSessions(archiveState.collectedSessions);
+        const selected = Array.isArray(msg.roles)
+          ? msg.roles.map(v => String(v || "").trim()).filter(Boolean)
+          : [];
+        archiveState.availableCsRoles = available;
+        archiveState.selectedCsRoles = selected.filter(role => available.includes(role));
+        await saveProgress();
+        return {
+          status: "ok",
+          selectedCsRoles: archiveState.selectedCsRoles,
+          availableCsRoles: archiveState.availableCsRoles
+        };
+      }
 
       case "clearData":
         if (archiveState.running) return { status: "error", message: "任务运行中，无法清空" };

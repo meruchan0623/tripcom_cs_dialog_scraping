@@ -12,6 +12,11 @@ const els = {
   btnArchive: document.getElementById("btnArchive"),
   btnExportStructured: document.getElementById("btnExportStructured"),
   btnExportLinks: document.getElementById("btnExportLinks"),
+  btnImportLinks: document.getElementById("btnImportLinks"),
+  inputImportLinks: document.getElementById("inputImportLinks"),
+  roleList: document.getElementById("roleList"),
+  btnSelectAllRoles: document.getElementById("btnSelectAllRoles"),
+  btnClearRoles: document.getElementById("btnClearRoles"),
   btnPause: document.getElementById("btnPause"),
   btnResume: document.getElementById("btnResume"),
   btnCancel: document.getElementById("btnCancel"),
@@ -88,6 +93,15 @@ function replaceLogs(logs) {
   els.logArea.scrollTop = els.logArea.scrollHeight;
 }
 
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function setButtonState(state) {
   const running = !!state.running;
   const paused = !!state.paused;
@@ -97,6 +111,14 @@ function setButtonState(state) {
   els.btnArchive.disabled = running || !readyToArchive;
   els.btnExportStructured.disabled = running || !readyToArchive;
   els.btnExportLinks.disabled = running || !readyToArchive;
+  els.btnImportLinks.disabled = running;
+  els.btnSelectAllRoles.disabled = running || !readyToArchive;
+  els.btnClearRoles.disabled = running || !readyToArchive;
+
+  const roleInputs = els.roleList.querySelectorAll('input[type="checkbox"][name="csRole"]');
+  roleInputs.forEach(input => {
+    input.disabled = running || !readyToArchive;
+  });
 
   els.btnPause.style.display = running && !paused ? "" : "none";
   els.btnPause.disabled = !(running && !paused);
@@ -146,6 +168,8 @@ function updateUI(state) {
     replaceLogs(state.log);
   }
 
+  renderRoleOptions(state);
+
   // 同步格式选择
   if (Array.isArray(state.selectedStructuredFormats)) {
     els.fmtJson.checked = state.selectedStructuredFormats.includes("json");
@@ -153,6 +177,28 @@ function updateUI(state) {
   }
 
   setButtonState(state);
+}
+
+function renderRoleOptions(state) {
+  const availableRoles = Array.isArray(state?.availableCsRoles) ? state.availableCsRoles : [];
+  const selectedRoles = new Set(Array.isArray(state?.selectedCsRoles) ? state.selectedCsRoles : []);
+
+  if (!availableRoles.length) {
+    els.roleList.innerHTML = '<span class="role-list-empty">请先点击“获取会话”加载客服角色</span>';
+    return;
+  }
+
+  const html = availableRoles.map(role => {
+    const checked = selectedRoles.has(role) ? "checked" : "";
+    const escaped = escapeHtml(role);
+    return `<label><input type="checkbox" name="csRole" value="${escaped}" ${checked}> ${escaped}</label>`;
+  }).join("");
+  els.roleList.innerHTML = html;
+
+  const roleInputs = els.roleList.querySelectorAll('input[type="checkbox"][name="csRole"]');
+  roleInputs.forEach(input => {
+    input.addEventListener("change", syncSelectedRoles);
+  });
 }
 
 async function init() {
@@ -248,6 +294,75 @@ async function handleExportLinks() {
   await refreshState();
 }
 
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const commaIdx = result.indexOf(",");
+      if (commaIdx < 0) {
+        reject(new Error("文件编码失败"));
+        return;
+      }
+      resolve(result.substring(commaIdx + 1));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleImportLinksClick() {
+  els.inputImportLinks.value = "";
+  els.inputImportLinks.click();
+}
+
+async function handleImportLinksFileChange(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const base64 = await readFileAsBase64(file);
+    const previewResp = await chrome.runtime.sendMessage({
+      type: "importLinksWorkbookPreview",
+      filename: file.name,
+      base64
+    });
+    if (previewResp?.status === "error") {
+      alert(previewResp.message || "预览失败");
+      return;
+    }
+
+    const preview = previewResp?.preview || {};
+    const roles = Array.isArray(preview.roles) ? preview.roles : [];
+    const topRoles = roles.slice(0, 15).map(r => `- ${r.csName}: ${r.count} 条`).join("\n");
+    const moreHint = roles.length > 15 ? `\n- ...其余 ${roles.length - 15} 位客服` : "";
+    const confirmText =
+      `即将导入链接表：${file.name}\n\n` +
+      `会话总数：${preview.totalSessions || 0}\n` +
+      `客服数量：${preview.totalRoles || 0}\n\n` +
+      `客服明细：\n${topRoles || "- 无"}${moreHint}\n\n` +
+      "确认导入吗？";
+    if (!confirm(confirmText)) {
+      return;
+    }
+
+    const resp = await chrome.runtime.sendMessage({
+      type: "importLinksWorkbook",
+      filename: file.name,
+      base64
+    });
+    if (resp?.status === "error") {
+      alert(resp.message || "导入失败");
+      return;
+    }
+    alert(resp?.message || "导入成功");
+    await refreshState();
+  } catch (error) {
+    alert("导入失败: " + error.message);
+  } finally {
+    els.inputImportLinks.value = "";
+  }
+}
+
 async function handlePause() {
   const resp = await chrome.runtime.sendMessage({ type: "pause" });
   if (resp?.status === "ok") {
@@ -309,6 +424,24 @@ async function syncFormats() {
   await chrome.runtime.sendMessage({ type: "setStructuredFormats", formats });
 }
 
+async function syncSelectedRoles() {
+  const checked = Array.from(els.roleList.querySelectorAll('input[type="checkbox"][name="csRole"]:checked'))
+    .map(input => input.value);
+  await chrome.runtime.sendMessage({ type: "setSelectedCsRoles", roles: checked });
+  await refreshState();
+}
+
+async function selectAllRoles() {
+  const all = Array.from(els.roleList.querySelectorAll('input[type="checkbox"][name="csRole"]')).map(input => input.value);
+  await chrome.runtime.sendMessage({ type: "setSelectedCsRoles", roles: all });
+  await refreshState();
+}
+
+async function clearAllRoles() {
+  await chrome.runtime.sendMessage({ type: "setSelectedCsRoles", roles: [] });
+  await refreshState();
+}
+
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.type === "progress" && msg.state) {
     updateUI(msg.state);
@@ -319,9 +452,13 @@ els.btnCollect.addEventListener("click", handleCollect);
 els.btnArchive.addEventListener("click", handleArchive);
 els.btnExportStructured.addEventListener("click", handleExportStructured);
 els.btnExportLinks.addEventListener("click", handleExportLinks);
+els.btnImportLinks.addEventListener("click", handleImportLinksClick);
+els.inputImportLinks.addEventListener("change", handleImportLinksFileChange);
 els.btnPause.addEventListener("click", handlePause);
 els.btnResume.addEventListener("click", handleResume);
 els.btnCancel.addEventListener("click", handleCancel);
+els.btnSelectAllRoles.addEventListener("click", selectAllRoles);
+els.btnClearRoles.addEventListener("click", clearAllRoles);
 els.btnClearData.addEventListener("click", handleClearData);
 els.btnReset.addEventListener("click", handleReset);
 els.configToggle.addEventListener("click", toggleConfig);
