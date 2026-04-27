@@ -32,7 +32,7 @@ let archiveState = {
   availableCsRoles: [],
   availableCsRoleStats: [],
   selectedCsRoles: [],
-  selectedStructuredFormats: ["json", "markdown"],
+  selectedStructuredFormats: ["json"],
   lastOutputKind: null,
   lastOutputSummary: null,
   config: { ...DEFAULT_CONFIG }
@@ -129,7 +129,7 @@ async function loadProgress() {
         : [],
       selectedStructuredFormats: Array.isArray(data.archiveState.selectedStructuredFormats)
         ? data.archiveState.selectedStructuredFormats
-        : ["json", "markdown"],
+        : ["json"],
       config: { ...DEFAULT_CONFIG, ...(data.archiveState.config || {}) }
     };
     archiveState.running = false;
@@ -844,7 +844,7 @@ async function resetAll() {
     currentSessionId: null, currentCsName: null,
     log: [], collectedSessions: [],
     availableCsRoles: [], availableCsRoleStats: [], selectedCsRoles: [],
-    selectedStructuredFormats: ["json", "markdown"],
+    selectedStructuredFormats: ["json"],
     lastOutputKind: null, lastOutputSummary: null,
     config: { ...DEFAULT_CONFIG }
   };
