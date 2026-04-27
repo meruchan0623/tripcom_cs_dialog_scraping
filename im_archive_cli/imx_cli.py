@@ -66,7 +66,10 @@ def cmd_auth_login(cfg: AppConfig, logger) -> int:
 def cmd_run_collect(cfg: AppConfig, logger, page_size: int | None, max_pages: int | None) -> int:
     controller = _make_controller(cfg)
     controller.ensure_chrome(headed=False)
-    config_payload = {}
+    config_payload = {
+        "concurrency": int(cfg.concurrency or 20),
+        "delayBetweenSaves": int(max(1, int(cfg.window_sec or 20)) * 1000),
+    }
     if page_size:
         config_payload["pageSize"] = int(page_size)
     if max_pages:

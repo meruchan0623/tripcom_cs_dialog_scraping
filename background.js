@@ -13,7 +13,7 @@ const DEFAULT_CONFIG = {
   outputPrefix: "IM_Archive",
   outputPath: "",
   delayBetweenPages: 120,
-  delayBetweenSaves: 30000,
+  delayBetweenSaves: 20000,
   concurrency: 20
 };
 

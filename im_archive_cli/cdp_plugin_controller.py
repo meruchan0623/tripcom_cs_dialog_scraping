@@ -150,23 +150,23 @@ class CDPPluginController:
         chrome = _detect_chrome_binary(self.cfg.chrome_path)
         profile = self._profile_path
         profile.mkdir(parents=True, exist_ok=True)
-        extension_arg = self._resolve_load_extension_arg()
         args = [
             chrome,
             f"--user-data-dir={profile}",
-            f"--disable-extensions-except={extension_arg}",
-            f"--load-extension={extension_arg}",
             "--no-first-run",
             "--no-default-browser-check",
             self.cfg.vbooking_url,
         ]
+        if bool(getattr(self.cfg, "load_unpacked_extension", True)):
+            extension_arg = self._resolve_load_extension_arg()
+            args.insert(2, f"--disable-extensions-except={extension_arg}")
+            args.insert(3, f"--load-extension={extension_arg}")
         if not headed:
             args.append("--headless=new")
         proc = subprocess.Popen(args, **_spawn_detached_kwargs())  # noqa: S603
         rt = ChromeRuntime(pid=proc.pid, port=0, started_at=time.time())
         self._save_runtime(rt)
         return rt
-
     def start_chrome(self, headed: bool = False, force_new: bool = False) -> ChromeRuntime:
         if self._is_cdp_alive() and not force_new:
             rt = self._load_runtime()
@@ -179,18 +179,19 @@ class CDPPluginController:
         chrome = _detect_chrome_binary(self.cfg.chrome_path)
         profile = self._profile_path
         profile.mkdir(parents=True, exist_ok=True)
-        extension_arg = self._resolve_load_extension_arg()
         args = [
             chrome,
             f"--remote-debugging-port={self.cfg.cdp_port}",
             "--remote-allow-origins=*",
             f"--user-data-dir={profile}",
-            f"--disable-extensions-except={extension_arg}",
-            f"--load-extension={extension_arg}",
             "--no-first-run",
             "--no-default-browser-check",
             self.cfg.vbooking_url,
         ]
+        if bool(getattr(self.cfg, "load_unpacked_extension", True)):
+            extension_arg = self._resolve_load_extension_arg()
+            args.insert(4, f"--disable-extensions-except={extension_arg}")
+            args.insert(5, f"--load-extension={extension_arg}")
         if not headed:
             args.append("--headless=new")
         proc = subprocess.Popen(args, **_spawn_detached_kwargs())  # noqa: S603
@@ -202,7 +203,6 @@ class CDPPluginController:
                 return rt
             time.sleep(0.2)
         raise RuntimeError("Chrome CDP 启动超时")
-
     def _resolve_load_extension_arg(self) -> str:
         """
         Resolve and sanitize extension directories for --load-extension.
@@ -308,6 +308,10 @@ class CDPPluginController:
         return list(_json_get(self._targets_url))
 
     def _find_extension_id(self) -> str:
+        configured_id = str(getattr(self.cfg, "extension_id", "") or "").strip()
+        if configured_id:
+            return configured_id
+
         ext_id = self._find_extension_id_from_preferences()
         if ext_id:
             return ext_id
@@ -318,9 +322,11 @@ class CDPPluginController:
             if not url.startswith("chrome-extension://"):
                 continue
             return parse_extension_id_from_target_url(url)
-        raise RuntimeError("未发现扩展 target，请确认扩展已通过 --load-extension 加载")
+        raise RuntimeError("未发现扩展 target，请确认扩展已安装并已启用")
 
     def _find_extension_id_from_preferences(self) -> str | None:
+        if not bool(getattr(self.cfg, "load_unpacked_extension", True)):
+            return None
         pref_path = self._profile_path / "Default" / "Preferences"
         if not pref_path.exists():
             return None
@@ -360,8 +366,38 @@ class CDPPluginController:
         return self._wait_extension_ready(timeout_sec=10.0)
 
     def _open_popup_and_get_page_ws(self, extension_id: str) -> str:
-        browser = CDPClient(self._get_browser_ws_url())
         popup_url = f"chrome-extension://{extension_id}/popup.html"
+
+        def _popup_targets() -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for t in self._list_targets():
+                if t.get("type") != "page":
+                    continue
+                url = str(t.get("url") or "")
+                if not url.startswith(popup_url):
+                    continue
+                if not t.get("webSocketDebuggerUrl"):
+                    continue
+                out.append(t)
+            return out
+
+        existing = _popup_targets()
+        if existing:
+            keep = existing[0]
+            extra_ids = [str(t.get("targetId")) for t in existing[1:] if t.get("targetId")]
+            if extra_ids:
+                browser = CDPClient(self._get_browser_ws_url())
+                try:
+                    for tid in extra_ids:
+                        try:
+                            browser.call("Target.closeTarget", {"targetId": tid})
+                        except Exception:
+                            pass
+                finally:
+                    browser.close()
+            return str(keep.get("webSocketDebuggerUrl"))
+
+        browser = CDPClient(self._get_browser_ws_url())
         target_id = None
         try:
             created = browser.call("Target.createTarget", {"url": popup_url})
@@ -372,20 +408,12 @@ class CDPPluginController:
             browser.close()
 
         for _ in range(50):
-            targets = self._list_targets()
-            # Preferred: the exact target we just created
+            targets = _popup_targets()
             for t in targets:
                 if t.get("targetId") == target_id:
-                    ws = t.get("webSocketDebuggerUrl")
-                    if ws:
-                        return str(ws)
-            # Fallback: any popup.html page target for this extension
-            for t in targets:
-                url = str(t.get("url") or "")
-                if url.startswith(popup_url):
-                    ws = t.get("webSocketDebuggerUrl")
-                    if ws:
-                        return str(ws)
+                    return str(t.get("webSocketDebuggerUrl"))
+            if targets:
+                return str(targets[0].get("webSocketDebuggerUrl"))
             time.sleep(0.1)
         raise RuntimeError("等待 popup target webSocketDebuggerUrl 超时")
 
@@ -412,10 +440,14 @@ class CDPPluginController:
     def call_extension(self, msg_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         data = {"type": msg_type, **(payload or {})}
         encoded = json.dumps(data, ensure_ascii=False)
+        ext_id = self._find_extension_id()
         expr = f"""
         (async () => {{
           const req = {encoded};
-          return await chrome.runtime.sendMessage(req);
+          if (chrome.runtime && chrome.runtime.id) {{
+            return await chrome.runtime.sendMessage(req);
+          }}
+          return await chrome.runtime.sendMessage({json.dumps(ext_id)}, req);
         }})()
         """
         result = self._eval_in_popup(expr, await_promise=True)

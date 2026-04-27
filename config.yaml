@@ -8,12 +8,14 @@ detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sess
 page_size: 100
 max_pages: 50
 concurrency: 20
-window_sec: 30
+window_sec: 20
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
 cdp_port: 9222
 chrome_path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+extension_id: ""
+load_unpacked_extension: true
 extension_dir: .
 extension_runtime_dir: .im_archive/runtime_extensions
 chrome_state_file: .im_archive/chrome_state.json

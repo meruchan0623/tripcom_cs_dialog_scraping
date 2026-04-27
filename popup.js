@@ -276,7 +276,7 @@ async function init() {
     if (cfg?.config) {
       document.getElementById("cfgPageSize").value = cfg.config.pageSize || 100;
       document.getElementById("cfgConcurrency").value = cfg.config.concurrency || 20;
-      document.getElementById("cfgDelay").value = Math.max(1, Math.round((cfg.config.delayBetweenSaves || 30000) / 1000));
+      document.getElementById("cfgDelay").value = Math.max(1, Math.round((cfg.config.delayBetweenSaves || 20000) / 1000));
       document.getElementById("cfgPrefix").value = cfg.config.outputPrefix || "IM_Archive";
       document.getElementById("cfgOutputPath").value = cfg.config.outputPath || "";
     }
@@ -457,7 +457,7 @@ async function saveConfig() {
   const config = {
     pageSize: parseInt(document.getElementById("cfgPageSize").value, 10) || 100,
     concurrency: Math.min(200, Math.max(1, parseInt(document.getElementById("cfgConcurrency").value, 10) || 20)),
-    delayBetweenSaves: Math.min(60000, Math.max(1000, (parseInt(document.getElementById("cfgDelay").value, 10) || 30) * 1000)),
+    delayBetweenSaves: Math.min(60000, Math.max(1000, (parseInt(document.getElementById("cfgDelay").value, 10) || 20) * 1000)),
     outputPrefix: document.getElementById("cfgPrefix").value.trim() || "IM_Archive",
     outputPath: document.getElementById("cfgOutputPath").value.trim()
   };

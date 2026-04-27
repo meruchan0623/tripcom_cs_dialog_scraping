@@ -19,12 +19,14 @@ class AppConfig:
     page_size: int = 100
     max_pages: int = 50
     concurrency: int = 20
-    window_sec: int = 30
+    window_sec: int = 20
     output_prefix: str = "IM_Archive"
     headless: bool = True
     timezone: str = "Asia/Shanghai"
     cdp_port: int = 9222
     chrome_path: str = ""
+    extension_id: str = ""
+    load_unpacked_extension: bool = True
     extension_dir: str = "."
     extension_runtime_dir: str = ".im_archive/runtime_extensions"
     chrome_state_file: str = ".im_archive/chrome_state.json"
