@@ -149,6 +149,27 @@
     return "unknown";
   }
 
+  function sanitizeChatHtml(chatEl, fallbackLi) {
+    const sourceEl = chatEl || fallbackLi;
+    if (!sourceEl) return "";
+
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = sourceEl.innerHTML;
+
+    const removeSelectors = [
+      ".img-status",
+      ".tip-con",
+      ".img-upload-progress-bg",
+      ".tran-con"
+    ];
+
+    for (const selector of removeSelectors) {
+      wrapper.querySelectorAll(selector).forEach(node => node.remove());
+    }
+
+    return wrapper.innerHTML.trim();
+  }
+
   function extractMessage(li, index, meta) {
     const chatEl = li.querySelector(".chat");
     const nicknameEl = li.querySelector(".nickname");
@@ -197,7 +218,7 @@
       senderName,
       messageType,
       text,
-      rawHtml: chatEl ? chatEl.innerHTML : li.innerHTML,
+      rawHtml: sanitizeChatHtml(chatEl, li),
       attachments: images
     };
   }
