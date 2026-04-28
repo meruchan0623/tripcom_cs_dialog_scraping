@@ -50,8 +50,8 @@ tripcom_cs_dialog_scraping/
 ## 输出规则
 
 - 保存位置：Chrome 默认下载目录
-- 文件命名：`{前缀}_{客服名}_{sessionId}_{序号}.html`
-- 默认前缀：`IM_Archive`
+- 文件命名：`IMChatlogExport_{会话创建时间yyyyMMddHHmmss}_{sessionId}_{客服名}.{html|json|md}`
+- 目录层级：`IMChatlogExport/{yyyyMMdd}/{客服名}/导出文件`（创建时间优先取会话列表里的创建时间）
 
 ## 已知限制
 

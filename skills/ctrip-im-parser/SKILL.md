@@ -12,7 +12,7 @@ description: |
 
 ## 概述
 
-从携程/Trip平台导出的 **IM_Archive_*.json** 文件中批量提取结构化数据。
+从携程/Trip平台导出的 **IMChatlogExport_*.json**（兼容历史 IM_Archive_*.json）文件中批量提取结构化数据。
 
 > **设计原则：纯数据提取，零业务逻辑。**
 > 
@@ -22,7 +22,7 @@ description: |
 
 ### 文件命名
 ```
-IM_Archive_{sessionId}_{序号}.json
+IMChatlogExport_{会话创建时间yyyyMMddHHmmss}_{sessionId}_{客服名}.json
 ```
 
 ### JSON 结构（每个文件 = 1个会话）
@@ -75,7 +75,7 @@ python {SKILL_DIR}/scripts/scan_im.py <目录路径> [参数...]
 
 | 参数 | 说明 |
 |------|------|
-| `<directory>` | 包含 IM_Archive_*.json 的目录路径（必填） |
+| `<directory>` | 导出根目录路径（必填）。支持递归扫描，建议传入 `IMChatlogExport/` 根目录 |
 | `-o FILE` / `--output FILE` | 输出为结构化 JSON 文件（否则输出摘要到 stdout） |
 | `--role ROLE` | 按 senderRole 过滤: `buyer` / `seller` / `system` |
 | `--keyword TEXT` / `-k TEXT` | 在消息文本 + 订单卡中做大小写不敏感子串搜索 |
@@ -180,3 +180,35 @@ python scan_im.py ./logs --extract orders -o orders.json
 ## 字段参考
 
 详见 `{SKILL_DIR}/references/data_schema.md`
+
+
+## 新目录与命名约定（2026-04）
+
+### 目录层级
+```
+IMChatlogExport/{yyyyMMdd}/{客服名}/IMChatlogExport_{yyyyMMddHHmmss}_{sessionId}_{客服名}.json
+```
+
+### 解析策略（供读取产物时使用）
+1. **优先按标准模式解析**：
+   - 文件名正则：`^IMChatlogExport_(\d{14})_([^_]+)_(.+)\.json$`
+   - 路径末尾两级：`{yyyyMMdd}/{客服名}/`
+2. **若文件名不匹配**：
+   - 回退读取 JSON 字段：`sessionId`、`csName`、`createTime`、`exportedAt`
+   - `createTime` 缺失时再用 `exportedAt` 或文件 mtime 推断
+3. **若发现新模式**：
+   - 记录新模式样例（至少3个）
+   - 提取稳定分隔符与字段位置（前缀、时间戳、sessionId、客服名）
+   - 在脚本中新增并行匹配规则，保留对旧模式兼容
+
+### 示例
+- `IMChatlogExport_20260428113045_100001089130749_门票活动旅游管家Nay.json`
+  - create_time: `2026-04-28 11:30:45`
+  - session_id: `100001089130749`
+  - cs_name: `门票活动旅游管家Nay`
+- `IMChatlogExport_20260427101403_200001090447125_vbk_2560483_门票活动旅游管家Susie.json`
+  - create_time: `2026-04-27 10:14:03`
+  - session_id: `200001090447125`
+  - cs_name: `vbk_2560483_门票活动旅游管家Susie`
+- 路径：`IMChatlogExport/20260427/门票活动旅游管家Sara/IMChatlogExport_20260427180122_600001087328645_门票活动旅游管家Sara.json`
+  - date_dir: `20260427`（可用于快速分区）

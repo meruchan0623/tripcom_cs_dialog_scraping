@@ -256,6 +256,7 @@
       csName: meta.csName || "",
       detailUrl: location.href,
       title: document.title || "",
+      createTime: meta.createTime || "",
       exportedAt: new Date().toISOString(),
       messages
     };

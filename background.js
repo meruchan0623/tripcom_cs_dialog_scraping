@@ -178,6 +178,61 @@ function normalizeFilenamePart(text, fallback = "Unknown") {
   return (normalized || fallback).substring(0, 40);
 }
 
+
+
+function normalizeCreateTimeParts(createTime) {
+  const raw = String(createTime || "").trim();
+  let dt = null;
+
+  if (raw) {
+    if (/^\d{10}$/.test(raw) || /^\d{13}$/.test(raw)) {
+      const n = Number(raw);
+      if (Number.isFinite(n)) dt = new Date(raw.length === 13 ? n : n * 1000);
+    }
+
+    if (!dt || Number.isNaN(dt.getTime())) {
+      const normalized = raw
+        .replace(/年/g, "-")
+        .replace(/月/g, "-")
+        .replace(/日/g, " ")
+        .replace(/[/.]/g, "-")
+        .replace(/T/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/Z$/i, "")
+        .trim();
+
+      const m = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+      if (m) {
+        dt = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0), Number(m[5] || 0), Number(m[6] || 0));
+      } else {
+        const m2 = normalized.match(/^(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        if (m2) {
+          const now = new Date();
+          dt = new Date(now.getFullYear(), Number(m2[1]) - 1, Number(m2[2]), Number(m2[3]), Number(m2[4]), Number(m2[5] || 0));
+        }
+      }
+    }
+  }
+
+  if (!dt || Number.isNaN(dt.getTime())) dt = new Date();
+  const yyyy = String(dt.getFullYear());
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  const hh = String(dt.getHours()).padStart(2, "0");
+  const mi = String(dt.getMinutes()).padStart(2, "0");
+  const ss = String(dt.getSeconds()).padStart(2, "0");
+  const stamp14 = `${yyyy}${mm}${dd}${hh}${mi}${ss}`;
+  return { stamp14, date8: `${yyyy}${mm}${dd}` };
+}
+
+function buildExportNameParts(sess) {
+  const csSafe = normalizeFilenamePart(sess?.csName || "Unknown");
+  const sid = String(sess?.sessionId || "Unknown").trim() || "Unknown";
+  const createRaw = String(sess?.createTime || "").trim();
+  const { stamp14, date8 } = normalizeCreateTimeParts(createRaw);
+  const baseName = `IMChatlogExport_${stamp14}_${sid}_${csSafe}`;
+  return { csSafe, sid, stamp14, date8, baseName };
+}
 function sanitizeSheetName(name, maxLen = 31) {
   let clean = String(name || "Unknown")
     .replace(/[\\/:*?\[\]]/g, "_")
@@ -691,7 +746,8 @@ async function archiveCollectedSessions() {
       const tab = await openDetailPage(sess.sessionId);
       if (!tab) { archiveState.failedSessions++; await log(`  ✗ 打开失败`); return; }
       try {
-        const fn = `${archiveState.config.outputPrefix}_${normalizeFilenamePart(sess.csName)}_${sess.sessionId}_${String(i+1).padStart(3,"0")}.html`;
+        const { date8, csSafe, baseName } = buildExportNameParts(sess);
+        const fn = `${date8}/${csSafe}/${baseName}.html`;
         if (await saveTabWithSingleFile(tab.id, fn)) { archiveState.completedSessions++; await log(`  OK: ${fn}`); }
         else { archiveState.failedSessions++; await log(`  ✗ 保存失败`); }
       } finally { await safeCloseTab(tab.id); }
@@ -717,7 +773,6 @@ async function exportStructuredConversations() {
   if (!selectedSessions.length) throw new Error("未选中任何客服角色或所选角色下无会话");
   const formats = archiveState.selectedStructuredFormats;
   if (!formats.length) throw new Error("未选择导出格式");
-  const markdownExportStamp = makeFilenameTimestamp();
   resetRunState("exporting_structured");
   archiveState.totalSessions = selectedSessions.length;
   archiveState.lastOutputKind = "structured";
@@ -740,22 +795,20 @@ async function exportStructuredConversations() {
             await dp.loadAllMessages({ settleMs: 400, stableRounds: 3 });
             return await dp.extractConversationStructured(meta);
           },
-          args: [{ sessionId: sess.sessionId, csName: sess.csName }]
+          args: [{ sessionId: sess.sessionId, csName: sess.csName, createTime: sess.createTime || "" }]
         });
         const data = r?.[0]?.result;
         if (!data?.messages) throw new Error("提取失败");
         await log(`  ${data.messages.length} 条消息`);
-        const safe = normalizeFilenamePart(sess.csName);
-        const seq = String(i+1).padStart(3,"0");
-        const pfx = archiveState.config.outputPrefix;
+        const { date8, csSafe, baseName } = buildExportNameParts(sess);
         if (formats.includes("json")) {
           const url = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
-          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${safe}/${pfx}_${sess.sessionId}_${seq}.json`), saveAs: false });
+          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${date8}/${csSafe}/${baseName}.json`), saveAs: false });
         }
         if (formats.includes("markdown")) {
           const md = createMarkdownFromStructured({ sessionId: sess.sessionId, csName: sess.csName, detailUrl: DETAIL_BASE_URL + sess.sessionId }, data.messages);
           const url = "data:text/markdown;charset=utf-8," + encodeURIComponent(md);
-          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${safe}/${pfx}_${sess.sessionId}_${seq}_${markdownExportStamp}.md`), saveAs: false });
+          await chrome.downloads.download({ url, filename: makeDownloadFilename(`${date8}/${csSafe}/${baseName}.md`), saveAs: false });
         }
         archiveState.completedSessions++;
       } catch (error) {

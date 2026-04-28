@@ -6,7 +6,7 @@ Pure data extraction from Ctrip IM conversation archives.
 Outputs structured JSON. Zero business logic baked in.
 
 Core capabilities:
-  1. Load & parse IM_Archive_*.json files (batch)
+  1. Load & parse IMChatlogExport / IM_Archive JSON files (batch)
   2. Extract messages with role, time, text, sequence
   3. Extract order cards embedded in rawHtml
   4. Filter by role / keyword / time range
@@ -48,7 +48,7 @@ ORDER_RE = {
 
 
 def load_session(filepath):
-    """Load a single IM_Archive JSON file. Returns dict or None."""
+    """Load a single exported IM JSON file. Returns dict or None."""
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -70,7 +70,7 @@ def extract_order(raw_html):
 
 def load_all_sessions(dir_path):
     """Load all JSON files from directory. Returns list of session dicts."""
-    files = sorted(glob.glob(os.path.join(dir_path, '*.json')))
+    files = sorted(glob.glob(os.path.join(dir_path, '**', '*.json'), recursive=True))
     sessions = []
     for fp in files:
         data = load_session(fp)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -11,7 +10,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from .browser import execute_js, execute_js_async
 from .config import AppConfig
 from .models import SessionRecord
-from .utils import append_failure, safe_name
+from .utils import append_failure, normalize_create_time_parts, safe_name
 
 
 def _create_markdown(meta: SessionRecord, messages: list[dict]) -> str:
@@ -53,18 +52,17 @@ def export_structured(
     failures_file = Path(config.failures_file)
     interval = max(0.05, float(config.window_sec) / max(1, int(config.concurrency)))
     detail_script = str(repo_root / "detail-page.js")
-    markdown_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
     success = 0
     failed = 0
     for i, sess in enumerate(sessions, start=1):
         cs_safe = safe_name(sess.cs_name)
-        seq = str(i).zfill(3)
-        base_name = f"{config.output_prefix}_{sess.session_id}_{seq}"
-        out_dir = output_dir / cs_safe
+        create_stamp, create_date = normalize_create_time_parts(sess.create_time)
+        base_name = f"IMChatlogExport_{create_stamp}_{sess.session_id}_{cs_safe}"
+        out_dir = output_dir / create_date / cs_safe
         out_dir.mkdir(parents=True, exist_ok=True)
         json_path = out_dir / f"{base_name}.json"
-        md_path = out_dir / f"{base_name}_{markdown_stamp}.md"
+        md_path = out_dir / f"{base_name}.md"
 
         if resume_from_state and "json" in formats and json_path.exists() and json_path.stat().st_size > 0:
             if "markdown" not in formats or (md_path.exists() and md_path.stat().st_size > 0):

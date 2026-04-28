@@ -9,7 +9,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from .browser import execute_js, execute_js_async
 from .config import AppConfig
 from .models import SessionRecord
-from .utils import append_failure, safe_name
+from .utils import append_failure, normalize_create_time_parts, safe_name
 
 
 def export_singlefile(
@@ -32,8 +32,9 @@ def export_singlefile(
     failed = 0
     for i, sess in enumerate(sessions, start=1):
         cs_safe = safe_name(sess.cs_name)
-        filename = f"{config.output_prefix}_{cs_safe}_{sess.session_id}_{str(i).zfill(3)}.html"
-        path = output_dir / cs_safe / filename
+        create_stamp, create_date = normalize_create_time_parts(sess.create_time)
+        filename = f"IMChatlogExport_{create_stamp}_{sess.session_id}_{cs_safe}.html"
+        path = output_dir / create_date / cs_safe / filename
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if resume_from_state and path.exists() and path.stat().st_size > 0:
