@@ -11,7 +11,8 @@ const MAX_PAGES = 50;
 const DEFAULT_CONFIG = {
   pageSize: 100,
   outputPrefix: "IM_Archive",
-  outputPath: "",
+  // 下载目录下的默认导出子目录：~/Downloads/IMChatlogExport
+  outputPath: "IMChatlogExport",
   delayBetweenPages: 120,
   // 默认节流窗口 20 秒，配合 concurrency=20，约 1 秒放行 1 个详情页
   delayBetweenSaves: 20000,
