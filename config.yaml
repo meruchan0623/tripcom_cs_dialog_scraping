@@ -1,6 +1,6 @@
 profile_dir: .im_archive/profile
 state_file: .im_archive/state.json
-output_dir: .im_archive/output
+output_dir: /Users/tsimclaw/Downloads/Ctrip-CS-dialog
 log_dir: .im_archive/logs
 failures_file: .im_archive/failures.jsonl
 vbooking_url: https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience
@@ -8,13 +8,13 @@ detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sess
 page_size: 100
 max_pages: 50
 concurrency: 20
-window_sec: 20
+window_sec: 10
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
 cdp_port: 9222
-chrome_path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-extension_id: ""
+chrome_path: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+extension_id: ''
 load_unpacked_extension: true
 extension_dir: .
 extension_runtime_dir: .im_archive/runtime_extensions
