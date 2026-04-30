@@ -273,13 +273,17 @@ class CDPPluginController:
                 self._save_runtime(rt)
                 return rt
             except Exception:  # noqa: BLE001
-                if rt and rt.pid > 0:
+                # Only try to kill/restart the browser if it is actually the one we launched
+                # in debug mode on this same CDP port. Otherwise, report the conflict clearly
+                # instead of attempting a force_new restart on an occupied port.
+                if rt and rt.pid > 0 and rt.port == self.cfg.cdp_port and self._is_pid_alive(rt.pid):
                     self._terminate_pid(rt.pid)
                     self._wait_cdp_down(timeout_sec=8.0)
                     return self.start_chrome(headed=headed, force_new=True)
                 raise RuntimeError(
-                    f"检测到 CDP 端口 {self.cfg.cdp_port} 已有 Chrome 但未加载本插件。"
-                    "请关闭该 Chrome 后重试，或修改 config.yaml 的 cdp_port 为新端口。"
+                    f"检测到 CDP 端口 {self.cfg.cdp_port} 已有 Chrome，但当前插件未成功加载。"
+                    "这通常是因为该端口上的浏览器不是由 imx 当前配置启动，或扩展加载失败。"
+                    "请关闭占用该端口的浏览器后重试，或修改 config.yaml 的 cdp_port 为新端口。"
                 )
         return self.start_chrome(headed=headed)
 
@@ -300,6 +304,15 @@ class CDPPluginController:
             if not self._is_cdp_alive():
                 return
             time.sleep(0.2)
+
+    def _is_pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
     def _get_browser_ws_url(self) -> str:
         version = _json_get(self._version_url)
