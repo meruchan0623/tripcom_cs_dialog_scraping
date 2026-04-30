@@ -49,9 +49,9 @@ tripcom_cs_dialog_scraping/
 
 ## 输出规则
 
-- 保存位置：Chrome 默认下载目录
+- 保存位置：默认导出到 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`
 - 文件命名：`IMChatlogExport_{会话创建时间yyyyMMddHHmmss}_{sessionId}_{客服名}.{html|json|md}`
-- 目录层级：`IMChatlogExport/{yyyyMMdd}/{客服名}/导出文件`（创建时间优先取会话列表里的创建时间）
+- 目录层级：`Ctrip-CS-dialog/{yyyyMMdd}/{客服名}/导出文件`（创建时间优先取会话列表里的创建时间）
 
 ## 已知限制
 
@@ -126,11 +126,11 @@ python -m im_archive_cli.imx_cli --help
 
 ### 默认运行速度（插件）
 
-插件默认节流速度已调整为：
+插件当前默认节流速度为：
 - `时间窗口内页数`：`20`
-- `时间窗口(秒)`：`30`
+- `时间窗口(秒)`：`10`
 
-对应含义：每 30 秒允许打开 20 页详情页（SingleFile/结构化导出都按该节流控制）。
+对应含义：每 10 秒允许打开 20 页详情页（SingleFile/结构化导出都按该节流控制）。
 
 ### 扩展自动加载机制（开发者模式）
 
@@ -324,5 +324,6 @@ imx run export --kind links
 - `extension_dir`：扩展源码目录（应包含 `manifest.json`）
 - `chrome_state_file`：运行中 Chrome 元信息文件
 - `output_prefix`：导出文件前缀
-- `concurrency`：默认并发页数（建议 `20`）
-- `window_sec`：默认时间窗口秒数（建议 `30`）
+- `output_dir`：默认 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`
+- `concurrency`：默认并发页数（当前默认 `20`）
+- `window_sec`：默认时间窗口秒数（当前默认 `10`）
