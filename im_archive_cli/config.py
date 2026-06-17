@@ -16,6 +16,13 @@ class AppConfig:
     failures_file: str = ".im_archive/failures.jsonl"
     vbooking_url: str = "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience"
     detail_base_url: str = "https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId="
+    ctrip_auth_json: str = "/Users/tashima_meru/Library/CloudStorage/OneDrive-个人/文档/ctrip-cli-sessions/ctrip_auth_plain.json"
+    ctrip_cookie_header_file: str = "/Users/tashima_meru/Library/CloudStorage/OneDrive-个人/文档/ctrip-cli-sessions/ctrip_cookie_header.txt"
+    ctrip_im_butype: str = "品类活动"
+    ctrip_im_consultation_scene: str = "aggregate"
+    ctrip_im_product_channel: str = "aggregate"
+    ctrip_im_currency_type: str = "CNY"
+    cdp_proxy_base_url: str = "http://localhost:3456"
     page_size: int = 100
     max_pages: int = 50
     concurrency: int = 20

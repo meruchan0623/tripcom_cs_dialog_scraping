@@ -990,6 +990,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case "getState":
         return { status: "ok", data: getStateSummary() };
+      case "getCollectedSessions":
+        return { status: "ok", sessions: archiveState.collectedSessions };
       case "getConfig":
         return { status: "ok", config: archiveState.config };
       case "setConfig":

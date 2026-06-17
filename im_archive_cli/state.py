@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .models import RunSummary, SessionRecord
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def dedupe_sessions(sessions: list[SessionRecord]) -> list[SessionRecord]:
@@ -36,7 +40,7 @@ class StateStore:
             "available_roles": [],
             "selected_roles": [],
             "last_run_summary": None,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": _now_utc_iso(),
         }
 
     def load(self) -> dict[str, Any]:
@@ -53,7 +57,7 @@ class StateStore:
 
     def save(self, data: dict[str, Any]) -> None:
         payload = dict(data)
-        payload["updated_at"] = datetime.utcnow().isoformat()
+        payload["updated_at"] = _now_utc_iso()
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def get_sessions(self) -> list[SessionRecord]:
@@ -92,4 +96,3 @@ class StateStore:
         data = self.load()
         data["last_run_summary"] = asdict(summary)
         self.save(data)
-

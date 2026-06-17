@@ -87,7 +87,7 @@ tripcom_cs_dialog_scraping/
 
 ## Python CDP 控制台（imx）
 
-本仓库新增 `imx` 命令：Python 通过 CDP 驱动 Chrome 扩展执行任务，不再直接驱动业务页面 DOM。
+本仓库新增 `imx` 命令：Python 通过 CLI 执行采集/筛选/导出。会话采集默认走“模拟前端请求”模式：复用当前已登录的 `vbooking.ctrip.com` 页面，在页面上下文内直接 `fetch` 携程后台 SOA 接口，不再依赖展开表格的 DOM 点击循环。结构化和 SingleFile 导出同样复用 web-access CDP proxy 的当前登录浏览器，不再依赖 chromedriver 下载。
 `imx chrome start` 会自动准备并加载当前仓库扩展（开发者模式 `--load-extension`），无需手工去 `chrome://extensions` 点击“加载已解压扩展”。
 
 ### 安装
@@ -155,8 +155,8 @@ imx chrome start --headed
 # 2) 首次登录（只需一次，后续复用 profile）
 imx auth login
 
-# 3) 抓取会话
-imx run collect --page-size 100
+# 3) 抓取会话（默认 --via cdp：在已登录页面内模拟前端请求）
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 100
 
 # 4) 查看客服筛选列表
 imx roles list
@@ -167,11 +167,11 @@ imx roles select --all
 # 5b) 或只选择某位/多位客服
 imx roles select --include "张三,李四"
 
-# 6) 导出结构化对话（JSON + Markdown）
-imx run export --kind structured
+# 6) 导出结构化对话（默认 JSON，可用 --formats 选择 Markdown）
+imx run export --kind structured --formats json,markdown
 ```
 
-如果你只要 JSON，可在插件侧把格式仅选 `JSON` 后再执行第 6 步。
+如果你只要 JSON，可直接执行 `imx run export --kind structured`。
 
 ### openclaw 一键脚本（推荐）
 
@@ -206,7 +206,7 @@ bash scripts/openclaw_structured_export.sh --roles "张三,李四"
 
 #### `imx chrome start`
 - `--headed`：有头启动 Chrome（不带该参数时按默认无头）
-- `--debug`：以 CDP 调试模式启动（需要执行 `run/roles/import/state` 自动化命令时使用）
+- `--debug`：以 CDP 调试模式启动（主要用于旧 `--via browser` 插件采集兜底）
   - 不加 `--debug` 时为“非调试启动”，用于先确认插件能正常加载
 
 示例：
@@ -228,17 +228,26 @@ imx auth login
 
 #### `imx run collect`
 - `--page-size <int>`：采集分页大小（建议 `100`）
-- `--max-pages <int>`：当前仅记录提示，不直接覆盖插件常量 `MAX_PAGES`
+- `--max-pages <int>`：每位客服最多读取页数
+- `--start-date <YYYY-MM-DD>`：历史咨询开始日期，默认昨天
+- `--end-date <YYYY-MM-DD>`：历史咨询结束日期，默认同开始日期
+- `--include "A,B,C"`：只采集指定客服，可填完整显示名、账号 ID 或昵称
+- `--via cdp|http|browser`：
+  - `cdp`：默认；在当前已登录携程页面上下文执行真实前端 `fetch`
+  - `http`：纯 Python requests，读取 `ctrip-cli-sessions` 中的 Cookie header；部分接口可能被 403 拦截
+  - `browser`：旧扩展点击采集路径，作为兼容兜底
 
 示例：
 ```bash
-imx run collect --page-size 100
-imx run collect --page-size 50 --max-pages 30
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 100
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --include "vbk_2538177" --page-size 10 --max-pages 1
+imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16
+imx run collect --via browser --page-size 100
 ```
 
 #### `imx roles list`
 - 无额外参数
-- 输出当前可选客服与已选标记
+- 从 Python state 输出当前可选客服与已选标记，不依赖浏览器插件 state
 
 #### `imx roles select`
 - `--all`：全选当前可选客服
@@ -256,18 +265,25 @@ imx roles select --include "张三,李四"
   - `singlefile`：归档 HTML
   - `structured`：结构化导出（JSON/Markdown）
   - `links`：导出链接表 xlsx
+- `--formats json,markdown`：仅 `structured` 生效，默认 `json`
+- `--output <path>`：仅 `links` 生效，指定 xlsx 输出路径
+
+`links` 导出直接读取 Python state 并写本地 xlsx；`structured` / `singlefile` 读取 Python state 后通过 `cdp_proxy_base_url` 打开会话详情页导出，不再读取插件内部 `archiveState`。
 
 示例：
 ```bash
 imx run export --kind structured
+imx run export --kind structured --formats json,markdown
 imx run export --kind singlefile
-imx run export --kind links
+imx run export --kind links --output /data/IM_Archive_links.xlsx
 ```
 
 #### `imx import links`
 - `--file <xlsx>`：要导入的链接表文件
 - `--preview`：仅预览，不执行导入
 - `--confirm`：直接确认导入（跳过交互确认）
+
+导入结果会写入 Python state，后续 `roles` / `run export` 直接复用。
 
 示例：
 ```bash
@@ -278,6 +294,8 @@ imx import links --file /data/IM_Archive_links.xlsx --confirm
 #### `imx state watch`
 - `--interval-sec <float>`：轮询间隔，默认 `1.0`
 - `--once`：只打印一次当前状态
+
+该命令查看 Python state 中的采集数、已选角色数和最近导出摘要。
 
 示例：
 ```bash
@@ -323,6 +341,8 @@ imx run export --kind links
 - `chrome_path`：Chrome 可执行文件（为空自动探测）
 - `extension_dir`：扩展源码目录（应包含 `manifest.json`）
 - `chrome_state_file`：运行中 Chrome 元信息文件
+- `ctrip_cookie_header_file` / `ctrip_auth_json`：纯 HTTP 模式读取的携程 Cookie 来源
+- `cdp_proxy_base_url`：页面上下文请求模式使用的 web-access CDP proxy，默认 `http://localhost:3456`
 - `output_prefix`：导出文件前缀
 - `output_dir`：默认 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`
 - `concurrency`：默认并发页数（当前默认 `20`）

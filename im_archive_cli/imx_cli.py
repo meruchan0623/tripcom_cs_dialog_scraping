@@ -3,11 +3,17 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
+from .cdp_proxy_export import CdpProxyClient, export_singlefile_via_cdp_proxy, export_structured_via_cdp_proxy
+from .ctrip_http import CtripImCdpFetchClient, CtripImHttpClient, default_date_range
 from .cdp_plugin_controller import CDPPluginController
 from .config import AppConfig, load_or_create_config
+from .models import RunSummary, SessionRecord
+from .state import StateStore
 from .utils import setup_logger
+from .xlsx_io import export_links_xlsx, import_links_xlsx, preview_sessions
 
 
 def _parse_csv(value: str | None) -> list[str]:
@@ -21,6 +27,10 @@ def _make_controller(cfg: AppConfig) -> CDPPluginController:
     elif cfg.extension_dir == ".":
         cfg.extension_dir = str(repo_root)
     return CDPPluginController(cfg, repo_root=repo_root)
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _wait_for_task_done(controller: CDPPluginController, logger, timeout_sec: int = 7200) -> dict:
@@ -63,7 +73,36 @@ def cmd_auth_login(cfg: AppConfig, logger) -> int:
     return 0
 
 
-def cmd_run_collect(cfg: AppConfig, logger, page_size: int | None, max_pages: int | None) -> int:
+def cmd_run_collect_http(
+    cfg: AppConfig,
+    logger,
+    page_size: int | None,
+    max_pages: int | None,
+    start_date: str | None,
+    end_date: str | None,
+    include: str | None,
+    via: str = "http",
+) -> int:
+    if not start_date or not end_date:
+        default_start, default_end = default_date_range()
+        start_date = start_date or default_start
+        end_date = end_date or default_end
+    size = int(page_size or cfg.page_size)
+    max_page = int(max_pages or cfg.max_pages)
+    include_roles = set(_parse_csv(include)) if include else None
+    if via == "cdp":
+        client = CtripImCdpFetchClient(cfg, log=logger.info)
+        logger.info(f"使用 CDP 页面上下文模拟前端请求采集: {start_date} -> {end_date}, page_size={size}, max_pages={max_page}")
+    else:
+        client = CtripImHttpClient(cfg, log=logger.info)
+        logger.info(f"使用 HTTP 模拟前端请求采集: {start_date} -> {end_date}, page_size={size}, max_pages={max_page}")
+    sessions = client.collect_sessions(start_date, end_date, page_size=size, max_pages=max_page, include_roles=include_roles)
+    StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
+    logger.info(f"采集结束: collected={len(sessions)}")
+    return 0
+
+
+def cmd_run_collect_browser(cfg: AppConfig, logger, page_size: int | None, max_pages: int | None) -> int:
     controller = _make_controller(cfg)
     controller.ensure_chrome(headed=False)
     # 每次 collect 前同步节流配置到插件，确保 CLI 和 GUI 的默认节奏一致
@@ -86,16 +125,23 @@ def cmd_run_collect(cfg: AppConfig, logger, page_size: int | None, max_pages: in
     if r.get("status") != "ok":
         raise RuntimeError(r.get("message") or "start 失败")
     final_state = _wait_for_task_done(controller, logger)
+    raw_sessions: list = []
+    collected = controller.call_extension("getCollectedSessions")
+    if collected.get("status") == "ok" and isinstance(collected.get("sessions"), list):
+        raw_sessions = collected.get("sessions") or []
+    if isinstance(raw_sessions, list):
+        sessions = [SessionRecord.from_dict(item) for item in raw_sessions if isinstance(item, dict)]
+        StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
+        logger.info(f"已同步插件采集结果到 Python state: {len(sessions)} 条")
     logger.info(f"采集结束: phase={final_state.get('phase')} collected={final_state.get('collectedCount')}")
     return 0
 
 
 def cmd_roles_list(cfg: AppConfig) -> int:
-    controller = _make_controller(cfg)
-    controller.ensure_chrome(headed=False)
-    s = controller.get_state()
-    available = s.get("availableCsRoles") or []
-    selected = set(s.get("selectedCsRoles") or [])
+    store = StateStore(Path(cfg.state_file))
+    state = store.load()
+    available = state.get("available_roles") or []
+    selected = set(state.get("selected_roles") or [])
     if not available:
         print("暂无角色，请先 run collect 或 import links")
         return 0
@@ -106,59 +152,66 @@ def cmd_roles_list(cfg: AppConfig) -> int:
 
 
 def cmd_roles_select(cfg: AppConfig, all_roles: bool, include: str | None) -> int:
-    controller = _make_controller(cfg)
-    controller.ensure_chrome(headed=False)
-    s = controller.get_state()
-    available = s.get("availableCsRoles") or []
+    store = StateStore(Path(cfg.state_file))
+    state = store.load()
+    available = state.get("available_roles") or []
     if not available:
         print("暂无可选角色")
         return 1
     chosen = available if all_roles else _parse_csv(include)
-    r = controller.call_extension("setSelectedCsRoles", {"roles": chosen})
-    if r.get("status") != "ok":
-        raise RuntimeError(r.get("message") or "setSelectedCsRoles 失败")
+    selected = store.set_selected_roles(chosen)
     print("已选角色:")
-    for x in r.get("selectedCsRoles") or []:
+    for x in selected:
         print(f"- {x}")
     return 0
 
 
-def cmd_run_export(cfg: AppConfig, logger, kind: str) -> int:
-    controller = _make_controller(cfg)
-    controller.ensure_chrome(headed=False)
-    mapping = {
-        "singlefile": "archiveSingleFile",
-        "structured": "exportStructured",
-        "links": "exportLinksWorkbook",
-    }
-    msg_type = mapping.get(kind)
-    if not msg_type:
+def cmd_run_export(cfg: AppConfig, logger, kind: str, formats: str | None = None, output: str | None = None) -> int:
+    store = StateStore(Path(cfg.state_file))
+    sessions = store.filtered_sessions()
+    if not sessions:
+        raise RuntimeError("未选中任何客服角色或所选角色下无会话，请先 run collect/import links 并 roles select")
+    summary = RunSummary(kind=kind, started_at=_now_utc_iso(), finished_at="", total=len(sessions), success=0, failed=0)
+    repo_root = Path(__file__).resolve().parents[1]
+    if kind == "links":
+        out_path = Path(output) if output else Path(cfg.output_dir) / f"{cfg.output_prefix}_links.xlsx"
+        export_links_xlsx(out_path, sessions)
+        summary.success = len(sessions)
+        summary.failed = 0
+        summary.finished_at = _now_utc_iso()
+        store.set_summary(summary)
+        logger.info(f"链接表导出完成: {out_path} ({len(sessions)} 条)")
+        return 0
+
+    proxy = CdpProxyClient(cfg.cdp_proxy_base_url)
+    if kind == "singlefile":
+        success, failed = export_singlefile_via_cdp_proxy(proxy, repo_root, cfg, sessions, logger.info)
+    elif kind == "structured":
+        selected_formats = _parse_csv(formats) or ["json"]
+        invalid = [f for f in selected_formats if f not in {"json", "markdown"}]
+        if invalid:
+            raise RuntimeError(f"未知结构化导出格式: {', '.join(invalid)}")
+        success, failed = export_structured_via_cdp_proxy(proxy, repo_root, cfg, sessions, selected_formats, logger.info)
+    else:
         raise RuntimeError(f"未知导出类型: {kind}")
-    r = controller.call_extension(msg_type)
-    if r.get("status") != "ok":
-        raise RuntimeError(r.get("message") or f"{msg_type} 失败")
-    final_state = _wait_for_task_done(controller, logger)
-    logger.info(
-        f"导出结束: kind={kind} phase={final_state.get('phase')} "
-        f"success={final_state.get('completedSessions')} failed={final_state.get('failedSessions')}"
-    )
+    summary.success = success
+    summary.failed = failed
+    summary.finished_at = _now_utc_iso()
+    store.set_summary(summary)
+    logger.info(f"导出结束: kind={kind} success={success} failed={failed}")
     return 0
 
 
 def cmd_import_links(cfg: AppConfig, file_path: Path, preview_only: bool, confirm: bool) -> int:
     if not file_path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
-    controller = _make_controller(cfg)
-    controller.ensure_chrome(headed=False)
-    preview = controller.import_links_preview(file_path)
-    if preview.get("status") != "ok":
-        raise RuntimeError(preview.get("message") or "import preview 失败")
-    preview_data = preview.get("preview") or {}
-    print(f"会话总数: {preview_data.get('totalSessions', 0)}")
-    print(f"客服数量: {preview_data.get('totalRoles', 0)}")
+    sessions = import_links_xlsx(file_path)
+    preview = preview_sessions(sessions)
+    print(f"会话总数: {preview.total_sessions}")
+    print(f"客服数量: {preview.total_roles}")
     print("客服明细:")
-    for role in preview_data.get("roles") or []:
-        print(f"- {role.get('csName')}: {role.get('count')}")
+    for role in preview.roles:
+        print(f"- {role.cs_name}: {role.count}")
 
     if preview_only and not confirm:
         return 0
@@ -167,22 +220,26 @@ def cmd_import_links(cfg: AppConfig, file_path: Path, preview_only: bool, confir
         if ans not in {"y", "yes"}:
             print("已取消导入")
             return 3
-    result = controller.import_links_apply(file_path)
-    if result.get("status") != "ok":
-        raise RuntimeError(result.get("message") or "import apply 失败")
-    print(result.get("message") or "导入成功")
+    StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
+    print(f"导入成功：{len(sessions)} 条会话")
     return 0
 
 
 def cmd_state_watch(cfg: AppConfig, interval_sec: float, once: bool = False) -> int:
-    controller = _make_controller(cfg)
-    controller.ensure_chrome(headed=False)
+    store = StateStore(Path(cfg.state_file))
     while True:
-        state = controller.get_state()
+        state = store.load()
+        all_sessions = state.get("collected_sessions") or []
+        selected = set(state.get("selected_roles") or [])
+        done = 0
+        fail = 0
+        summary = state.get("last_run_summary") or {}
+        if isinstance(summary, dict):
+            done = int(summary.get("success") or 0)
+            fail = int(summary.get("failed") or 0)
         print(
-            f"phase={state.get('phase')} running={state.get('running')} paused={state.get('paused')} "
-            f"total={state.get('totalSessions')} done={state.get('completedSessions')} fail={state.get('failedSessions')} "
-            f"collected={state.get('collectedCount')}"
+            f"phase=ready running=False paused=False total={len(all_sessions)} done={done} fail={fail} "
+            f"collected={len(all_sessions)} selectedRoles={len(selected)}"
         )
         if once:
             return 0
@@ -209,8 +266,14 @@ def build_parser() -> argparse.ArgumentParser:
     collect = run_sub.add_parser("collect")
     collect.add_argument("--page-size", type=int, default=None)
     collect.add_argument("--max-pages", type=int, default=None)
+    collect.add_argument("--start-date", default=None, help="YYYY-MM-DD，默认昨天")
+    collect.add_argument("--end-date", default=None, help="YYYY-MM-DD，默认同 start-date")
+    collect.add_argument("--include", default=None, help="逗号分隔客服账号/昵称/显示名")
+    collect.add_argument("--via", choices=["cdp", "http", "browser"], default="cdp", help="cdp=已登录页面内 fetch；http=纯 requests；browser=旧扩展点击采集")
     export = run_sub.add_parser("export")
     export.add_argument("--kind", choices=["singlefile", "structured", "links"], required=True)
+    export.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
+    export.add_argument("--output", default=None, help="links 导出路径")
 
     roles = sub.add_parser("roles")
     roles_sub = roles.add_subparsers(dest="roles_command")
@@ -245,9 +308,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "auth" and args.auth_command == "login":
         return cmd_auth_login(cfg, logger)
     if args.command == "run" and args.run_command == "collect":
-        return cmd_run_collect(cfg, logger, args.page_size, args.max_pages)
+        if args.via == "browser":
+            return cmd_run_collect_browser(cfg, logger, args.page_size, args.max_pages)
+        return cmd_run_collect_http(cfg, logger, args.page_size, args.max_pages, args.start_date, args.end_date, args.include, via=args.via)
     if args.command == "run" and args.run_command == "export":
-        return cmd_run_export(cfg, logger, args.kind)
+        return cmd_run_export(cfg, logger, args.kind, formats=args.formats, output=args.output)
     if args.command == "roles" and args.roles_command == "list":
         return cmd_roles_list(cfg)
     if args.command == "roles" and args.roles_command == "select":
