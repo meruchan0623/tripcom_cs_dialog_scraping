@@ -22,6 +22,12 @@ class AppConfig:
     ctrip_im_consultation_scene: str = "aggregate"
     ctrip_im_product_channel: str = "aggregate"
     ctrip_im_currency_type: str = "CNY"
+    ctrip_im_detail_messages_url: str = ""
+    ctrip_im_detail_extra_body: dict[str, Any] | None = None
+    ctrip_im_detail_page_size: int = 100
+    ctrip_im_detail_verified_source: str = ""
+    ctrip_im_detail_verified_url: str = ""
+    ctrip_im_detail_verified_at: str = ""
     cdp_proxy_base_url: str = "http://localhost:3456"
     page_size: int = 100
     max_pages: int = 50
@@ -58,5 +64,10 @@ def load_or_create_config(path: Path) -> AppConfig:
         return AppConfig.from_mapping(data)
     cfg = AppConfig()
     ensure_parent(path)
-    path.write_text(yaml.safe_dump(asdict(cfg), sort_keys=False, allow_unicode=True), encoding="utf-8")
+    save_config(path, cfg)
     return cfg
+
+
+def save_config(path: Path, cfg: AppConfig) -> None:
+    ensure_parent(path)
+    path.write_text(yaml.safe_dump(asdict(cfg), sort_keys=False, allow_unicode=True), encoding="utf-8")

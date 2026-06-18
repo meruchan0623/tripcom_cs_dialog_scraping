@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
 from im_archive_cli.config import AppConfig
-from im_archive_cli.imx_cli import cmd_import_links, cmd_roles_list, cmd_roles_select, cmd_run_export, cmd_state_watch
+from im_archive_cli.imx_cli import cmd_import_links, cmd_roles_list, cmd_roles_select, cmd_run_collect_http, cmd_run_export, cmd_state_watch
 from im_archive_cli.models import SessionRecord
 from im_archive_cli.state import StateStore
 from im_archive_cli.xlsx_io import export_links_xlsx
@@ -75,3 +78,351 @@ def test_import_links_writes_python_store(tmp_path) -> None:
 
     sessions = StateStore(Path(cfg.state_file)).get_sessions()
     assert [item.session_id for item in sessions] == ["s1"]
+
+
+def test_http_export_logs_budget_when_request_fails(monkeypatch, tmp_path) -> None:
+    from im_archive_cli import imx_cli
+
+    cfg = make_cfg(tmp_path)
+    cfg.ctrip_cookie_header_file = str(tmp_path / "cookie.txt")
+    Path(cfg.ctrip_cookie_header_file).write_text("foo=bar", encoding="utf-8")
+    cfg.ctrip_auth_json = str(tmp_path / "missing.json")
+    seed_state(cfg)
+    logger = DummyLogger()
+
+    class FailingClient:
+        def __init__(self, cfg, log=None, request_budget=None):
+            self.request_budget = request_budget
+
+        def fetch_conversation(self, session):
+            self.request_budget.consume("detail")
+            raise RuntimeError("HTTP 403")
+
+    monkeypatch.setattr(imx_cli, "CtripImDetailHttpClient", FailingClient)
+
+    assert cmd_run_export(cfg, logger, "structured", via="http", request_budget=3) == 0
+
+    assert any("携程接口请求计数: used=2, limit=3" in line for line in logger.lines)
+
+
+def test_collect_rejects_request_budget_over_30_before_client_setup(tmp_path) -> None:
+    cfg = make_cfg(tmp_path)
+
+    with pytest.raises(RuntimeError, match="collect request-budget 不能超过 30"):
+        cmd_run_collect_http(
+            cfg,
+            DummyLogger(),
+            page_size=1,
+            max_pages=1,
+            start_date="2026-06-16",
+            end_date="2026-06-16",
+            include=None,
+            via="http",
+            request_budget=31,
+        )
+
+
+def test_http_export_rejects_negative_request_budget_before_state_read(tmp_path) -> None:
+    cfg = make_cfg(tmp_path)
+
+    with pytest.raises(RuntimeError, match="export request-budget 不能为负数"):
+        cmd_run_export(cfg, DummyLogger(), "structured", via="http", request_budget=-1)
+
+
+def test_collect_rejects_request_ledger_without_request_budget(tmp_path) -> None:
+    cfg = make_cfg(tmp_path)
+
+    with pytest.raises(RuntimeError, match="collect request-ledger 必须配合 request-budget 使用"):
+        cmd_run_collect_http(
+            cfg,
+            DummyLogger(),
+            page_size=1,
+            max_pages=1,
+            start_date="2026-06-16",
+            end_date="2026-06-16",
+            include=None,
+            via="http",
+            request_ledger=str(tmp_path / "ledger.json"),
+        )
+
+
+def test_export_rejects_request_ledger_without_request_budget(tmp_path) -> None:
+    cfg = make_cfg(tmp_path)
+
+    with pytest.raises(RuntimeError, match="export request-ledger 必须配合 request-budget 使用"):
+        cmd_run_export(cfg, DummyLogger(), "structured", via="http", request_ledger=str(tmp_path / "ledger.json"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "via"),
+    [
+        ("links", "cdp"),
+        ("singlefile", "cdp"),
+        ("structured", "cdp"),
+    ],
+)
+def test_export_rejects_budget_on_paths_that_cannot_count_requests(tmp_path, kind, via) -> None:
+    cfg = make_cfg(tmp_path)
+
+    with pytest.raises(RuntimeError, match="只支持 structured --via http"):
+        cmd_run_export(cfg, DummyLogger(), kind, via=via, request_budget=30)
+
+
+def test_main_prints_clean_error_for_request_budget_over_30(tmp_path, capsys) -> None:
+    from im_archive_cli.imx_cli import main
+
+    cfg_path = tmp_path / "config.yaml"
+
+    rc = main(
+        [
+            "--config",
+            str(cfg_path),
+            "run",
+            "collect",
+            "--via",
+            "http",
+            "--start-date",
+            "2026-06-16",
+            "--end-date",
+            "2026-06-16",
+            "--request-budget",
+            "31",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "collect request-budget 不能超过 30" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_auth_status_reports_sources_without_cookie_values(tmp_path, capsys) -> None:
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    cfg = make_cfg(tmp_path)
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=secret; bar=value", encoding="utf-8")
+    cfg.ctrip_cookie_header_file = str(cookie_file)
+    cfg.ctrip_auth_json = str(tmp_path / "missing.json")
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+
+    rc = main(["--config", str(cfg_path), "auth", "status"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["selected"] == str(cookie_file)
+    assert payload["sources"][0]["cookieNames"] == ["foo", "bar"]
+    assert "secret" not in json.dumps(payload)
+    assert "value" not in json.dumps(payload)
+
+
+def test_main_rejects_browser_collect_with_request_budget(tmp_path, capsys) -> None:
+    from im_archive_cli.imx_cli import main
+
+    cfg_path = tmp_path / "config.yaml"
+
+    rc = main(
+        [
+            "--config",
+            str(cfg_path),
+            "run",
+            "collect",
+            "--via",
+            "browser",
+            "--request-budget",
+            "30",
+            "--request-ledger",
+            str(tmp_path / "ledger.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "collect --via browser 旧插件路径无法精确执行 request-budget/request-ledger" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_request_budget_status_reports_missing_ledger_as_zero(tmp_path, capsys) -> None:
+    from im_archive_cli.imx_cli import main
+
+    ledger = tmp_path / "ledger.json"
+
+    rc = main(["request-budget", "status", "--request-budget", "30", "--request-ledger", str(ledger)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload == {"ledger": str(ledger), "limit": 30, "used": 0, "remaining": 30, "exceeded": False}
+    assert not ledger.exists()
+
+
+def test_main_request_budget_status_reads_existing_ledger(tmp_path, capsys) -> None:
+    from im_archive_cli.imx_cli import main
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"limit": 30, "used": 7, "remaining": 23}), encoding="utf-8")
+
+    rc = main(["request-budget", "status", "--request-budget", "30", "--request-ledger", str(ledger)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["used"] == 7
+    assert payload["remaining"] == 23
+    assert payload["exceeded"] is False
+
+
+def test_main_request_budget_status_marks_exceeded_ledger(tmp_path, capsys) -> None:
+    from im_archive_cli.imx_cli import main
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"limit": 30, "used": 31, "remaining": 0}), encoding="utf-8")
+
+    rc = main(["request-budget", "status", "--request-budget", "30", "--request-ledger", str(ledger)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["used"] == 31
+    assert payload["remaining"] == 0
+    assert payload["exceeded"] is True
+
+
+def test_main_preflight_reports_missing_ctrip_targets(monkeypatch, tmp_path, capsys) -> None:
+    from im_archive_cli import imx_cli
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    def fake_proxy_status(_base_url):
+        return {
+            "via": "proxy",
+            "targetCount": 1,
+            "vbookingTargetCount": 0,
+            "detailTargetCount": 0,
+            "readyForPageContextCollect": False,
+            "readyForDetailPageInspection": False,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(imx_cli, "inspect_proxy_status", fake_proxy_status)
+    ledger = tmp_path / "ledger.json"
+    cfg = make_cfg(tmp_path)
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=secret", encoding="utf-8")
+    cfg.ctrip_cookie_header_file = str(cookie_file)
+    cfg.ctrip_auth_json = str(tmp_path / "missing.json")
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+
+    rc = main(["--config", str(cfg_path), "preflight", "--request-budget", "30", "--request-ledger", str(ledger), "--via", "proxy"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["ready"] is False
+    assert payload["requestBudget"]["remaining"] == 30
+    assert payload["auth"]["selected"] == str(cookie_file)
+    assert "secret" not in json.dumps(payload)
+    assert "当前浏览器没有 vbooking.ctrip.com 或 imvendor.ctrip.com target" in payload["issues"]
+
+
+def test_main_preflight_reports_exhausted_budget(monkeypatch, tmp_path, capsys) -> None:
+    from im_archive_cli import imx_cli
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    def fake_proxy_status(_base_url):
+        return {
+            "via": "proxy",
+            "targetCount": 1,
+            "vbookingTargetCount": 1,
+            "detailTargetCount": 0,
+            "readyForPageContextCollect": True,
+            "readyForDetailPageInspection": False,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(imx_cli, "inspect_proxy_status", fake_proxy_status)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"limit": 30, "used": 30, "remaining": 0}), encoding="utf-8")
+    cfg = make_cfg(tmp_path)
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=secret", encoding="utf-8")
+    cfg.ctrip_cookie_header_file = str(cookie_file)
+    cfg.ctrip_auth_json = str(tmp_path / "missing.json")
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+
+    rc = main(["--config", str(cfg_path), "preflight", "--request-budget", "30", "--request-ledger", str(ledger), "--via", "proxy"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["ready"] is False
+    assert payload["requestBudget"]["remaining"] == 0
+    assert payload["requestBudget"]["exceeded"] is False
+    assert "携程接口请求账本剩余额度为 0" in payload["issues"]
+
+
+def test_main_preflight_reports_exceeded_budget(monkeypatch, tmp_path, capsys) -> None:
+    from im_archive_cli import imx_cli
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    def fake_proxy_status(_base_url):
+        return {
+            "via": "proxy",
+            "targetCount": 1,
+            "vbookingTargetCount": 1,
+            "detailTargetCount": 0,
+            "readyForPageContextCollect": True,
+            "readyForDetailPageInspection": False,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(imx_cli, "inspect_proxy_status", fake_proxy_status)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"limit": 30, "used": 31, "remaining": 0}), encoding="utf-8")
+    cfg = make_cfg(tmp_path)
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=secret", encoding="utf-8")
+    cfg.ctrip_cookie_header_file = str(cookie_file)
+    cfg.ctrip_auth_json = str(tmp_path / "missing.json")
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+
+    rc = main(["--config", str(cfg_path), "preflight", "--request-budget", "30", "--request-ledger", str(ledger), "--via", "proxy"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["requestBudget"]["exceeded"] is True
+    assert "携程接口请求账本已超过上限，必须停止目标实现" in payload["issues"]
+
+
+def test_main_preflight_reports_missing_auth_sources(monkeypatch, tmp_path, capsys) -> None:
+    from im_archive_cli import imx_cli
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    def fake_proxy_status(_base_url):
+        return {
+            "via": "proxy",
+            "targetCount": 1,
+            "vbookingTargetCount": 1,
+            "detailTargetCount": 0,
+            "readyForPageContextCollect": True,
+            "readyForDetailPageInspection": False,
+            "targets": [],
+        }
+
+    monkeypatch.setattr(imx_cli, "inspect_proxy_status", fake_proxy_status)
+    cfg = make_cfg(tmp_path)
+    cfg.ctrip_cookie_header_file = str(tmp_path / "missing-cookie.txt")
+    cfg.ctrip_auth_json = str(tmp_path / "missing-auth.json")
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+    ledger = tmp_path / "ledger.json"
+
+    rc = main(["--config", str(cfg_path), "preflight", "--request-budget", "30", "--request-ledger", str(ledger), "--via", "proxy"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["auth"]["selected"] is None
+    assert "未找到可用 ctrip-cli-sessions 请求头/登录态文件" in payload["issues"]
