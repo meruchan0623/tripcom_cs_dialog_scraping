@@ -18,6 +18,115 @@ description: |
 3. 通过 Python state 完成角色筛选、链接表导出、结构化 JSON/Markdown 导出、SingleFile HTML 导出。
 4. 用命令输出和产物回读确认本次运行是否成功。
 
+## 已验证链路
+
+当前项目在 Hermes/Agent 机器上的已验证链路是：
+
+1. `run collect --via cdp`：
+   复用已登录的 `vbooking.ctrip.com` 页面，在页面上下文里发真实前端 `fetch`，抓客服列表和会话列表。
+2. `roles select`：
+   基于 `.im_archive/state.json` 选择全部或部分客服。
+3. `run export --kind structured --via cdp`：
+   通过 `cdp_proxy_base_url` 打开每条详情页，注入 `detail-page.js`，提取完整消息数组，落盘 `json` / `md`。
+4. 后处理：
+   用导出的 `IMChatlogExport_*.json`、`links xlsx`、会话索引 `csv/xlsx` 做筛选、统计、质检分析。
+
+注意：
+
+- 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`。
+- 纯 `requests` 的 `export --via http` 只有在详情接口 URL 已经通过 `discover detail-xhr` 验证并写回配置后才应尝试。
+- 因此 Hermes 默认正式链路应使用 `cdp`，不要把 `http` 当作主路径。
+
+## 历史咨询筛选请求
+
+Hermes Agent 需要知道 UI 筛选项如何落到接口请求体：
+
+- 客人来源：
+  `productChannel`
+- 咨询场景：
+  `consultationScene`
+- 历史咨询日期/自定义日期区间：
+  `startDate`、`endDate`
+- 业务类型：
+  `butype`
+
+已实测映射：
+
+- 客人来源 `Trip` -> `productChannel: "trip"`
+- 客人来源 `汇总` -> `productChannel: "aggregate"`
+- 咨询场景 `汇总` -> `consultationScene: "aggregate"`
+- 自定义日期区间 -> `startDate: "YYYY-MM-DD"`、`endDate: "YYYY-MM-DD"`
+
+推断但未逐项实测的映射：
+
+- 客人来源 `CTrip` -> 通常是 `productChannel: "ctrip"`
+- 咨询场景 `售前` -> 通常是 `consultationScene: "presale"`
+- 咨询场景 `售后` -> 通常是 `consultationScene: "postsale"`
+
+当前 CLI 已直接暴露日期参数：
+
+```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
+  --start-date 2026-06-16 \
+  --end-date 2026-06-16 \
+  --via cdp
+```
+
+当前 CLI 没有单独的 `--product-channel` 或 `--consultation-scene` 参数。要筛选客人来源或咨询场景，写入配置后再运行：
+
+```yaml
+ctrip_im_product_channel: trip
+ctrip_im_consultation_scene: aggregate
+ctrip_im_butype: 品类活动
+```
+
+客服列表接口请求体：
+
+```json
+{
+  "metricList": ["sev_session_count", "avg_work_duration", "avg_efficiency"],
+  "searchMap": {},
+  "filterType": "fail",
+  "orderColumn": "sev_session_count",
+  "orderType": "asc",
+  "butype": "品类活动",
+  "consultationScene": "aggregate",
+  "startDate": "2026-06-16",
+  "endDate": "2026-06-16",
+  "pageNo": 1,
+  "pageSize": 100,
+  "productChannel": "trip",
+  "currencyType": "CNY"
+}
+```
+
+单客服会话列表接口请求体：
+
+```json
+{
+  "metricList": [],
+  "searchMap": {
+    "vendor_account_id": "vbk_2538177",
+    "vendor_account_name": "门票活动旅游管家Sara"
+  },
+  "orderColumn": "session_create_time",
+  "orderType": "asc",
+  "butype": "品类活动",
+  "consultationScene": "aggregate",
+  "startDate": "2026-06-16",
+  "endDate": "2026-06-16",
+  "pageNo": 1,
+  "pageSize": 100,
+  "productChannel": "trip"
+}
+```
+
+接口地址：
+
+- 客服列表：`POST https://m.ctrip.com/restapi/soa2/13807/getEmployeeDimMetricDetailsV3`
+- 单客服会话列表：`POST https://m.ctrip.com/restapi/soa2/13807/getSessionDimMetricDetailsV3`
+- 详情消息：`POST https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession`，请求体通常是 `{"sessionId":"<session_id>"}`
+
 ## 项目位置
 
 默认仓库：
@@ -38,10 +147,9 @@ find /Users/tashima_meru/Develop -maxdepth 2 -name pyproject.toml -path '*tripco
 
 ```bash
 python3 -m im_archive_cli.imx_cli --help
-python3 -m pytest
 ```
 
-测试失败时不要继续跑正式归档；先修复本地代码或环境。
+只有在维护代码或升级依赖时才跑测试；日常 Hermes 执行不要求先跑 `pytest`。
 
 ### 2. web-access CDP proxy
 
@@ -72,6 +180,29 @@ open 'https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExper
 ```
 
 无人值守任务不得盲目重试登录；出现登录墙、403、空页面时记录失败并告警。
+
+### 4. 输出目录
+
+Hermes 主机上优先使用仓库内可写目录：
+
+```text
+.im_archive/output
+```
+
+不要依赖历史示例里的 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`，除非该目录在当前 Hermes 机器上真实存在且可写。
+
+确认当前配置：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+from im_archive_cli.config import load_or_create_config
+cfg = load_or_create_config(Path('.im_archive/config.yaml'))
+print('output_dir=', cfg.output_dir)
+print('state_file=', cfg.state_file)
+print('proxy=', cfg.cdp_proxy_base_url)
+PY
+```
 
 ## 标准无人值守流程
 
@@ -116,6 +247,17 @@ python3 -m im_archive_cli.imx_cli run collect \
 
 `--via http` 只作为诊断模式；携程 `13807` 接口可能对纯 requests 返回 403。
 
+推荐显式传入参数，避免依赖默认值：
+
+```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
+  --start-date "$RUN_DATE" \
+  --end-date "$RUN_DATE" \
+  --page-size "${PAGE_SIZE:-100}" \
+  --max-pages "${MAX_PAGES:-50}" \
+  --via cdp
+```
+
 ### 3. 选择角色
 
 默认 collect 后会全选所有角色。仍建议显式确认：
@@ -156,6 +298,81 @@ SingleFile HTML：
 ```bash
 python3 -m im_archive_cli.imx_cli run export --kind singlefile
 ```
+
+Hermes 正式任务推荐：
+
+```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
+  --kind structured \
+  --formats json,markdown \
+  --via cdp
+```
+
+说明：
+
+- `structured --via cdp`：当前最稳妥，适合正式产出。
+- `structured --via http`：只在你已经完成 `detail-xhr` 发现并写入 `ctrip_im_detail_messages_url` 后使用。
+- `singlefile`：适合保留页面归档，不适合作为主要分析输入。
+
+## 典型 Hermes 命令模板
+
+### 全量抓取某一天
+
+```bash
+RUN_DATE="2026-06-16"
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
+  --start-date "$RUN_DATE" \
+  --end-date "$RUN_DATE" \
+  --page-size 100 \
+  --max-pages 50 \
+  --via cdp
+
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select --all
+
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
+  --kind structured \
+  --formats json,markdown \
+  --via cdp
+```
+
+### 只抓某个客服
+
+```bash
+RUN_DATE="2026-06-16"
+ROLE="vbk_2538177/门票活动旅游管家Sara"
+
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
+  --start-date "$RUN_DATE" \
+  --end-date "$RUN_DATE" \
+  --include "$ROLE" \
+  --page-size 100 \
+  --max-pages 50 \
+  --via cdp
+
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select --include "$ROLE"
+
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
+  --kind structured \
+  --formats json,markdown \
+  --via cdp
+```
+
+### 只导出链接表
+
+```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --kind links
+```
+
+### 诊断纯 HTTP 可用性
+
+```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
+  --start-date "$RUN_DATE" \
+  --end-date "$RUN_DATE" \
+  --via http
+```
+
+如果这里报 `HTTP 403`，不要继续加大重试；回到 `--via cdp`。
 
 ## 自动任务推荐脚本
 
@@ -225,6 +442,95 @@ PY
 - `run export` 出现 `failed>0`：不算全成功；读取 `failures_file`。
 - `--via http` 403 不代表登录态完全失效；优先验证 `--via cdp`。
 
+## 产物位置
+
+Hermes 机器上应优先关注这些文件：
+
+- `.im_archive/state.json`：
+  当前会话池、角色选择、最近一次运行摘要。
+- `.im_archive/output/im_sessions_<date>.json`：
+  当天抓到的会话列表快照。
+- `.im_archive/output/<yyyymmdd>/<客服>/IMChatlogExport_*.json`：
+  每条会话的结构化对话明细。
+- `.im_archive/output/<yyyymmdd>/<客服>/IMChatlogExport_*.md`：
+  便于人工浏览的 Markdown。
+- `.im_archive/failures.jsonl`：
+  导出失败明细。
+
+如果已经额外生成索引文件，也可直接使用：
+
+- `.im_archive/session_index_<date>.csv`
+- `.im_archive/session_index_<date>.xlsx`
+
+这些索引适合做 Excel 筛选、消息量排序、客服维度透视。
+
+## 过滤与分析
+
+这个 skill 负责“采集和导出”。对结果做过滤分析时，优先调用同仓库 skill：
+
+- `skills/ctrip-im-parser/SKILL.md`
+
+适用方式：
+
+1. 先完成结构化导出，保证目录中存在 `IMChatlogExport_*.json`。
+2. 再用 parser skill 的 `scan_im.py` 扫描 `.im_archive/output/<yyyymmdd>`。
+3. 输出汇总 JSON，供后续 Agent 再做业务判断、分类、质检、统计。
+
+典型分析命令：
+
+按关键词筛消息：
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  -k refund \
+  -o .im_archive/analysis_refund_20260616.json
+```
+
+只看买家消息：
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --role buyer \
+  -o .im_archive/analysis_buyer_20260616.json
+```
+
+抽取订单卡：
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --extract orders \
+  -o .im_archive/analysis_orders_20260616.json
+```
+
+看上下文窗口：
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  -k cancel \
+  --ctx 3 \
+  -o .im_archive/analysis_cancel_ctx_20260616.json
+```
+
+看响应时延：
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --seq-diff \
+  -o .im_archive/analysis_gaps_20260616.json
+```
+
+分析时的实务建议：
+
+- 做客服质量分析时，先跑 `--ctx`，再由上层 Agent 判断话术是否有效。
+- 做退款/改期/投诉类聚类时，先用 `-k` 产生子集，再让上层 Agent 归类。
+- 做响应效率统计时，优先分析 `buyer -> seller` 的相邻 gap，而不是所有 gap 混算。
+- 订单信息不要只从文本里猜，优先读取 `rawHtml` 里的订单卡抽取结果。
+
 ## 常见故障处理
 
 ### CDP proxy 不可用
@@ -275,10 +581,22 @@ PY
 
 Hermes Agent 主机上如用户不同，先在 `config.yaml` 改 `output_dir` 到 Agent 可写目录，再运行。
 
+### 结果很多，如何快速筛
+
+先看索引：
+
+```bash
+python3 -m im_archive_cli.imx_cli state watch --once
+```
+
+然后优先使用：
+
+- `session_index_<date>.csv/.xlsx` 做客服、消息量、附件数量筛选。
+- `scan_im.py` 的 `-k`、`--role`、`--extract orders`、`--ctx`、`--seq-diff` 做机器侧二次过滤。
+
 ## 不要做
 
 - 不要把 Cookie、Authorization、cticket、完整请求头写入日志、README、skill 或 durable memory。
 - 不要在 403 后无限重试；最多做一次 `cdp` 模式验证，然后告警。
 - 不要用纯 requests 成功与否判断整个携程登录态；以当前已登录浏览器页面为真相面。
 - 不要把 `structured` / `singlefile` 改回 chromedriver 依赖；Hermes 自动主机应走 `cdp_proxy_base_url`。
-
