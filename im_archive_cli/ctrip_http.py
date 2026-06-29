@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -13,6 +14,7 @@ import requests
 
 from .config import AppConfig
 from .models import SessionRecord
+from .media import extract_inline_image_attachment
 from .state import dedupe_sessions
 
 EMPLOYEE_URL = "https://m.ctrip.com/restapi/soa2/13807/getEmployeeDimMetricDetailsV3"
@@ -53,6 +55,7 @@ class CtripRequestBudget:
     limit: int
     used: int = 0
     ledger_path: Path | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.ledger_path and self.ledger_path.exists():
@@ -63,17 +66,19 @@ class CtripRequestBudget:
                 self.used = 0
 
     def consume(self, label: str) -> None:
-        if self.used + 1 > self.limit:
-            raise CtripRequestBudgetExceeded(f"携程接口请求预算已耗尽：limit={self.limit}, used={self.used}, next={label}")
-        self.used += 1
-        self.save()
+        with self._lock:
+            if self.used + 1 > self.limit:
+                raise CtripRequestBudgetExceeded(f"携程接口请求预算已耗尽：limit={self.limit}, used={self.used}, next={label}")
+            self.used += 1
+            self.save()
 
     def add_used(self, count: int) -> None:
-        next_used = self.used + int(count)
-        if next_used > self.limit:
-            raise CtripRequestBudgetExceeded(f"携程接口请求预算已耗尽：limit={self.limit}, used={self.used}, next_add={count}")
-        self.used = next_used
-        self.save()
+        with self._lock:
+            next_used = self.used + int(count)
+            if next_used > self.limit:
+                raise CtripRequestBudgetExceeded(f"携程接口请求预算已耗尽：limit={self.limit}, used={self.used}, next_add={count}")
+            self.used = next_used
+            self.save()
 
     @property
     def remaining(self) -> int:
@@ -257,7 +262,7 @@ class CtripImHttpClient:
         self,
         cfg: AppConfig,
         log: Callable[[str], None] | None = None,
-        request_interval_sec: float = 0.2,
+        request_interval_sec: float = 0.5,
         session: requests.Session | None = None,
         request_budget: CtripRequestBudget | None = None,
     ):
@@ -373,7 +378,7 @@ class CtripImCdpFetchClient(CtripImHttpClient):
         self,
         cfg: AppConfig,
         log: Callable[[str], None] | None = None,
-        request_interval_sec: float = 0.2,
+        request_interval_sec: float = 0.5,
         target_id: str | None = None,
         request_budget: CtripRequestBudget | None = None,
     ):
@@ -538,12 +543,14 @@ def normalize_detail_messages(data: Any, session: SessionRecord) -> list[dict[st
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
+        message_body = _first_str(row, ("messageBody",))
         text = _first_str(
             row,
             (
                 "text",
                 "content",
                 "message",
+                "messageBody",
                 "msg",
                 "msgContent",
                 "messageContent",
@@ -551,11 +558,16 @@ def normalize_detail_messages(data: Any, session: SessionRecord) -> list[dict[st
                 "body",
             ),
         )
+        inline_image = extract_inline_image_attachment(message_body)
+        if inline_image is not None:
+            text = "[图片]"
         sender_name = _first_str(row, ("senderName", "sendName", "fromName", "nickName", "userName", "name"))
         sender_role = _normalize_sender_role(_first_str(row, ("senderRole", "role", "senderType", "fromType", "source")))
         timestamp = _first_str(row, ("timestampText", "sendTime", "messageTime", "createTime", "time", "createdAt"))
         attachments = _extract_attachments(row)
-        message_type = _normalize_message_type(_first_str(row, ("messageType", "msgType", "type")), text, attachments)
+        if inline_image is not None:
+            attachments.append(inline_image)
+        message_type = _normalize_message_type(_first_str(row, ("messageType", "msgType", "msgtype", "type")), text, attachments)
         messages.append(
             {
                 "sessionId": session.session_id,
@@ -609,6 +621,7 @@ def _looks_like_message(item: Any) -> bool:
         "text",
         "content",
         "message",
+        "messageBody",
         "msgContent",
         "messageContent",
         "sendTime",
@@ -669,8 +682,10 @@ def _normalize_sender_role(value: str) -> str:
 
 def _normalize_message_type(value: str, text: str, attachments: list[dict[str, str]]) -> str:
     lowered = value.lower()
-    if "image" in lowered or "img" in lowered or attachments:
-        return "image" if not text else "text"
+    if any(x in lowered for x in ("image", "img", "pic")):
+        return "image"
+    if any(isinstance(att, dict) and att.get("source") == "messageBody" for att in attachments):
+        return "image"
     if "card" in lowered or "order" in lowered:
         return "card"
     if text:

@@ -5,10 +5,10 @@ log_dir: .im_archive/logs
 failures_file: .im_archive/failures.jsonl
 vbooking_url: https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience
 detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=
-page_size: 100
+page_size: 1000
 max_pages: 50
-concurrency: 20
-window_sec: 10
+concurrency: 4
+window_sec: 2
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai

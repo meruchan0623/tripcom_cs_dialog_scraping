@@ -29,10 +29,10 @@ class AppConfig:
     ctrip_im_detail_verified_url: str = ""
     ctrip_im_detail_verified_at: str = ""
     cdp_proxy_base_url: str = "http://localhost:3456"
-    page_size: int = 100
+    page_size: int = 1000
     max_pages: int = 50
-    concurrency: int = 20
-    window_sec: int = 20
+    concurrency: int = 4
+    window_sec: int = 2
     output_prefix: str = "IM_Archive"
     headless: bool = True
     timezone: str = "Asia/Shanghai"
@@ -44,6 +44,11 @@ class AppConfig:
     extension_runtime_dir: str = ".im_archive/runtime_extensions"
     chrome_state_file: str = ".im_archive/chrome_state.json"
     cdp_poll_interval_sec: float = 1.0
+    download_images: bool = True
+    image_max_workers: int = 4
+    image_request_interval_sec: float = 0.5
+    image_timeout_sec: int = 30
+    image_max_bytes: int = 20_971_520
 
     @staticmethod
     def from_mapping(data: dict[str, Any]) -> "AppConfig":

@@ -16,7 +16,6 @@
 tripcom_cs_dialog_scraping/
 ├─ background.js
 ├─ content-script.js
-├─ detail-page.js
 ├─ page-bridge.js
 ├─ popup.html
 ├─ popup.js
@@ -130,7 +129,7 @@ python -m im_archive_cli.imx_cli --help
 - `时间窗口内页数`：`20`
 - `时间窗口(秒)`：`10`
 
-对应含义：每 10 秒允许打开 20 页详情页（SingleFile/结构化导出都按该节流控制）。
+对应含义：每 10 秒允许打开 20 页详情页（SingleFile 页面归档按该节流控制；结构化 JSON/Markdown 导出走 HTTP 详情接口）。
 
 ### 扩展自动加载机制（开发者模式）
 
@@ -155,8 +154,8 @@ imx chrome start --headed
 # 2) 首次登录（只需一次，后续复用 profile）
 imx auth login
 
-# 3) 抓取会话（默认 --via cdp：在已登录页面内模拟前端请求）
-imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 100
+# 3) 抓取会话（默认 --via cdp：在已登录页面内模拟前端请求，默认 page_size=1000）
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16
 
 # 4) 查看客服筛选列表
 imx roles list
@@ -198,6 +197,22 @@ bash scripts/openclaw_structured_export.sh --roles "张三,李四"
 - `scripts/openclaw_setup.sh`：创建 `.venv` 并安装 `imx`
 - `scripts/openclaw_login.sh`：有头登录并持久化 profile
 - `scripts/openclaw_structured_export.sh`：固定流程“获取会话 -> 角色筛选 -> 导出结构化”
+
+### 正文图片导出
+
+`imx run export --kind structured` 除了导出消息文字，还会处理正文图片（`source == "messageBody"`）：
+
+- 默认打开：`download_images: true`
+- 输出目录：与 JSON/MD 同级的 `<base_name>_assets/`（见 `AGENT_IMAGE_REFERENCE_GUIDE.md`）
+- JSON 关键字段：
+  - `messages[].attachments[]`
+  - `localPath`、`relativePath`、`src`、`thumbSrc`
+  - `source`、`downloadStatus`
+- Markdown 渲染：优先使用 `![alt](...)` 引用导出的本地路径
+- 关闭正文图片导出：在配置文件中设置 `download_images: false`
+- 相关实现边界与失败处理请按
+  [AGENT 图片参考手册](./docs/AGENT_IMAGE_REFERENCE_GUIDE.md)
+  执行（包括头像/卡片图忽略规则和 `downloadStatus=failed` 处理）
 
 ### CLI 参数总览（详细）
 
@@ -252,11 +267,11 @@ imx auth status
 
 示例：
 ```bash
-imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 100
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 1000
 imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --include "vbk_2538177" --page-size 10 --max-pages 1
 imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16
 imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16 --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
-imx run collect --via browser --page-size 100
+imx run collect --via browser --page-size 1000
 ```
 
 #### `imx roles list`
@@ -281,19 +296,20 @@ imx roles select --include "张三,李四"
   - `links`：导出链接表 xlsx
 - `--formats json,markdown`：仅 `structured` 生效，默认 `json`
 - `--output <path>`：仅 `links` 生效，指定 xlsx 输出路径
-- `--via cdp|http`：仅 `structured` 生效；`http` 为纯 Python requests 导出详情消息
+- `--via http`：仅 `structured` 生效；结构化 JSON/Markdown 导出只支持纯 Python requests 详情消息
 - `--request-budget <int>`：本次 HTTP 详情导出最多允许发出的携程接口请求数，最大 `30`
 - `--request-ledger <path>`：跨多条命令累计请求数的 JSON 账本；必须配合 `--request-budget 30` 使用，建议与发现/采集命令共用同一路径
 
-`links` 导出直接读取 Python state 并写本地 xlsx；`structured` 默认通过 `cdp_proxy_base_url` 打开会话详情页导出，也可用
-`--via http` 走纯 requests 详情接口；`singlefile` 仍通过 `cdp_proxy_base_url` 打开详情页归档，不再读取插件内部 `archiveState`。
-`--request-budget/--request-ledger` 只支持 `structured --via http`；CDP 页面导出和 SingleFile 页面归档无法逐个请求精确计数，带预算参数会被拒绝。
+`links` 导出直接读取 Python state 并写本地 xlsx；`structured` 只通过 `--via http` 走纯 requests 详情接口；`singlefile` 仍通过 `cdp_proxy_base_url` 打开详情页归档，不再读取插件内部 `archiveState`。
+CDP/Selenium DOM 聊天记录抓取已经剥离；不要再通过页面 DOM 或旧详情页注入脚本解析聊天列表生成 JSON/Markdown。CDP 仍用于 `collect --via cdp`、`discover detail-xhr`、`preflight` 和 `singlefile` 页面归档。
+`--request-budget/--request-ledger` 只支持 `structured --via http`；SingleFile 页面归档无法逐个请求精确计数，带预算参数会被拒绝。
 HTTP 详情导出在发出第一条请求前还会检查账本剩余额度是否至少覆盖当前选中的会话数；如果 `remaining < selected_sessions`，命令会提前停止，避免明知预算不足还先请求一部分会话。
 
 示例：
 ```bash
 imx run export --kind structured
 imx run export --kind structured --formats json,markdown
+imx run export --kind structured --via http --formats json,markdown
 imx run export --kind structured --via http --formats json,markdown --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
 imx run export --kind singlefile
 imx run export --kind links --output /data/IM_Archive_links.xlsx
@@ -437,7 +453,7 @@ imx run export --kind structured
 #### 剧本 B：全量会话归档（HTML）
 ```bash
 imx chrome start
-imx run collect --page-size 100
+imx run collect --page-size 1000
 imx roles select --all
 imx run export --kind singlefile
 ```
@@ -445,7 +461,7 @@ imx run export --kind singlefile
 #### 剧本 C：仅导出链接表供他机复用
 ```bash
 imx chrome start
-imx run collect --page-size 100
+imx run collect --page-size 1000
 imx roles select --all
 imx run export --kind links
 ```
@@ -468,5 +484,6 @@ imx run export --kind links
 - `cdp_proxy_base_url`：页面上下文请求模式使用的 web-access CDP proxy，默认 `http://localhost:3456`
 - `output_prefix`：导出文件前缀
 - `output_dir`：默认 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`
-- `concurrency`：默认并发页数（当前默认 `20`）
-- `window_sec`：默认时间窗口秒数（当前默认 `10`）
+- `page_size`：默认单页容量（当前默认 `1000`，来自 2026-06-22 至 2026-06-28 会话列表探测最大稳定值）
+- `concurrency`：HTTP 结构化导出默认最大并发请求数（当前默认 `4`）
+- `window_sec`：HTTP 结构化导出时间窗口秒数（当前默认 `2`，即每批最多 4 个请求，批次间隔约 0.5 秒）

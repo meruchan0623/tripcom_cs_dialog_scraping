@@ -342,6 +342,96 @@ def test_normalize_detail_messages_finds_nested_message_rows() -> None:
     assert messages[0]["sessionId"] == "s1"
 
 
+def test_normalize_detail_messages_accepts_imvendor_messages_shape() -> None:
+    session = SessionRecord(session_id="s1", cs_name="Alice")
+    payload = {
+        "ResponseStatus": {"Ack": "Success"},
+        "messages": [
+            {
+                "messageBody": "真实接口消息",
+                "createTime": "2026-06-27 09:00:00",
+                "msgtype": "text",
+            }
+        ],
+    }
+
+    messages = normalize_detail_messages(payload, session)
+
+    assert len(messages) == 1
+    assert messages[0]["text"] == "真实接口消息"
+    assert messages[0]["timestampText"] == "2026-06-27 09:00:00"
+
+
+def test_normalize_detail_messages_extracts_inline_image_attachment() -> None:
+    session = SessionRecord(session_id="s1", cs_name="Alice")
+    payload = {
+        "messages": [
+            {
+                "messageBody": (
+                    '{"btype":1,"url":"https://dimg04.tripcdn.com/images/original.jpg",'
+                    '"thumbUrl":"https://dimg04.tripcdn.com/images/thumb.jpg",'
+                    '"width":720,"height":1440,"msgtype":"image"}'
+                )
+            }
+        ],
+    }
+
+    messages = normalize_detail_messages(payload, session)
+
+    assert len(messages) == 1
+    assert messages[0]["messageType"] == "image"
+    assert messages[0]["text"] == "[图片]"
+    assert messages[0]["attachments"] == [
+        {
+            "src": "https://dimg04.tripcdn.com/images/original.jpg",
+            "thumbSrc": "https://dimg04.tripcdn.com/images/thumb.jpg",
+            "width": "720",
+            "height": "1440",
+            "source": "messageBody",
+            "btype": "1",
+            "imagePath": "",
+            "thumbPath": "",
+        }
+    ]
+
+
+def test_normalize_detail_messages_non_image_file_attachment_not_image_type() -> None:
+    session = SessionRecord(session_id="s1", cs_name="Alice")
+    payload = {
+        "messages": [
+            {
+                "msgContent": "see file",
+                "msgType": "file",
+                "fileList": [{"fileUrl": "https://example.com/doc.pdf", "fileName": "doc.pdf"}],
+            }
+        ]
+    }
+
+    messages = normalize_detail_messages(payload, session)
+
+    assert len(messages) == 1
+    assert messages[0]["messageType"] != "image"
+
+
+def test_normalize_detail_messages_system_json_no_message_body_image_rewrite() -> None:
+    session = SessionRecord(session_id="s1", cs_name="Alice")
+    payload = {
+        "messages": [
+            {
+                "messageBody": (
+                    '{"infos":[{"avatar":{"url":"https://avatars.example.com/staff_01.png","thumbUrl":"https://avatars.example.com/staff_01_t.png"}}]}'
+                )
+            }
+        ],
+    }
+
+    messages = normalize_detail_messages(payload, session)
+
+    assert len(messages) == 1
+    assert messages[0]["text"] != "[图片]"
+    assert all(att.get("source") != "messageBody" for att in messages[0]["attachments"])
+
+
 def test_detail_http_client_requires_captured_endpoint(tmp_path) -> None:
     cookie_file = tmp_path / "cookie.txt"
     cookie_file.write_text("foo=bar", encoding="utf-8")

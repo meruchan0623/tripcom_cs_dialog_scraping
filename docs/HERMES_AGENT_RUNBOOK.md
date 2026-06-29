@@ -23,15 +23,15 @@ python3 -m im_archive_cli.imx_cli --help
   -> run collect --via cdp
   -> state.json 会话池
   -> roles select
-  -> run export --kind structured --via cdp
+  -> run export --kind structured --via http
   -> IMChatlogExport_*.json / *.md
   -> scan_im.py / CSV / XLSX 二次分析
 ```
 
 重要结论：
 
-- `--via cdp` 是 Hermes 正式推荐路径。它在已登录页面上下文里执行请求，能复用浏览器登录态。
-- `--via http` 是纯 `requests` 路径，但当前环境对部分携程接口可能返回 `403`，不应作为默认正式路径。
+- `run export --kind structured` 只支持 `--via http`，通过已验证的 `16037/getMessagesBySession` 请求合同导出 JSON/Markdown。
+- `--via cdp` 仍用于采集列表、请求发现、预检和 SingleFile 页面归档；不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
 - 日期区间可用 CLI 参数传入；客人来源和咨询场景当前通过配置字段传入。
 
 ## 2. 前置条件
@@ -118,7 +118,7 @@ Hermes 机器优先使用仓库内输出目录：
 ```bash
 --start-date YYYY-MM-DD
 --end-date YYYY-MM-DD
---page-size 100
+--page-size 1000
 --max-pages 50
 --include <客服账号/客服名/显示名>
 --via cdp|http|browser
@@ -253,9 +253,52 @@ POST https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession
 }
 ```
 
-当前正式导出默认不直接用纯 `requests` 调这个接口，而是通过 `run export --kind structured --via cdp` 打开详情页、注入 `detail-page.js` 并从页面结构抽取。纯 HTTP 详情导出必须先经过 `discover detail-xhr` 验证配置。
+结构化 JSON/Markdown 导出只允许使用 HTTP 详情接口：
+
+```bash
+imx run export --kind structured --via http --formats json,markdown
+```
+
+如果 HTTP 详情导出返回 `401/403` 或 `messages` 为空，不要回退到 CDP/Selenium DOM 聊天记录抓取。应先执行 `discover detail-xhr` 复核 `getMessagesBySession` 请求体、请求头和登录态，再修正配置。
 
 ## 5. 典型执行链路
+
+### 图片导出验收
+
+对结构化导出的正文图片，运行一次检查并确认：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json
+
+base_dir = Path('.im_archive/output')
+inline_images = downloaded = failed = 0
+
+for json_file in base_dir.rglob('*_*.json'):
+    data = json.loads(json_file.read_text(encoding='utf-8'))
+    for m in data.get('messages', []):
+        for a in m.get('attachments', []) or []:
+            if a.get('source') != 'messageBody':
+                continue
+            inline_images += 1
+            if a.get('downloadStatus') == 'failed':
+                failed += 1
+            elif a.get('localPath') or a.get('relativePath') or a.get('src'):
+                downloaded += 1
+
+print(f'inline_images={inline_images}')
+print(f'downloaded={downloaded}')
+print(f'failed={failed}')
+PY
+```
+
+验收标准：
+
+- `inline_images` = `downloaded + failed`（可由脚本外加一条审计一致性检查）
+- `failed` 允许非零，但需记录对应 `sessionId`、`sequence` 与文件名，且该失败不应标记为会话导出失败
+- `downloadStatus` 为 `failed` 的图片不计入系统错误，只计入补跑/回写清单
+- 对图片引用的报告必须带 `sessionId` + `sequence` + 本地路径；禁止将头像/卡片图记为客人正文图片
 
 ### 5.1 全量导出某一天
 
@@ -267,7 +310,7 @@ RUN_DATE="2026-06-16"
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
   --start-date "$RUN_DATE" \
   --end-date "$RUN_DATE" \
-  --page-size 100 \
+  --page-size 1000 \
   --max-pages 50 \
   --via cdp
 
@@ -288,7 +331,7 @@ END_DATE="2026-06-16"
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
   --start-date "$START_DATE" \
   --end-date "$END_DATE" \
-  --page-size 100 \
+  --page-size 1000 \
   --max-pages 50 \
   --via cdp
 ```
@@ -303,7 +346,7 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
   --start-date "$RUN_DATE" \
   --end-date "$RUN_DATE" \
   --include "$ROLE" \
-  --page-size 100 \
+  --page-size 1000 \
   --max-pages 50 \
   --via cdp
 
@@ -321,9 +364,9 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --kind links
 ```
 
-### 5.5 诊断纯 HTTP
+### 5.5 诊断 HTTP 结构化导出
 
-纯 HTTP 只作为诊断或加速路径，不替代默认 `--via cdp`。使用前先确认：
+结构化 JSON/Markdown 导出只支持 `--via http`。使用前先确认：
 
 - `imx auth status` 能找到可用 cookie header 或 auth JSON。
 - 1 请求预算 probe 不返回空体 `HTTP 403`。
@@ -348,7 +391,7 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
   --request-ledger ".im_archive/ctrip-request-ledger-${RUN_DATE}-http-probe.json"
 ```
 
-如果返回 `HTTP 401/403`，不要循环重试，也不要继续进入详情导出。记录为登录态新鲜度、浏览器 cookie 同步或风控层阻碍，回到 `--via cdp` 并检查登录页面状态。`messages` 为空不视为成功导出，必须记录失败样本并对照 `getMessagesBySession` 请求体和 header 合同。
+如果返回 `HTTP 401/403` 或业务错误如 `Token为空`，不要循环重试，也不要回退到 DOM 聊天记录抓取。记录为登录态新鲜度、浏览器 cookie 同步或风控层阻碍，刷新登录态后重新执行 `discover detail-xhr` 并对照 `getMessagesBySession` 请求体和 header 合同。`messages` 为空不视为成功导出，必须记录失败样本。
 
 ## 6. 输出文件
 
@@ -426,9 +469,9 @@ PY
 判定规则：
 
 - `collected=0` 且预期有咨询：检查登录态、日期、`productChannel`、`consultationScene`。
-- 导出 JSON 存在但 `messages=0`：检查详情页登录态和 `detail-page.js` 选择器。
+- 导出 JSON 存在但 `messages=0`：检查 `getMessagesBySession` 请求体、请求头、分页参数和登录态，不要回退到 DOM 抓取。
 - `failures.jsonl` 非空：读取失败原因后按 session 重试。
-- `--via http` 返回 403：不等于账号失效，优先验证 `--via cdp`。
+- `--via http` 返回 403：不等于账号失效，先执行 `discover detail-xhr` 复核接口合同和登录态。
 
 ## 8. 结果过滤与分析
 
@@ -526,17 +569,17 @@ consultationScene 是否过窄
 结构化导出的节奏由配置控制：
 
 ```yaml
-window_sec: 20
-concurrency: 20
+window_sec: 2
+concurrency: 4
 ```
 
-实际间隔近似：
+HTTP 结构化导出按批次节流：
 
 ```text
-window_sec / concurrency
+每批最多 concurrency 个请求，批次间隔约 window_sec / concurrency 秒
 ```
 
-例如 `20 / 20 = 1` 秒/会话。需要更慢时提高 `window_sec` 或降低 `concurrency`。
+例如 `2 / 4 = 0.5` 秒，即每 0.5 秒最多并发发出 4 个详情请求。需要更慢时提高 `window_sec` 或降低 `concurrency`。
 
 ## 10. 不要做
 

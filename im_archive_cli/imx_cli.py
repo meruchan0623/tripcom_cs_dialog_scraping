@@ -7,7 +7,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .cdp_proxy_export import CdpProxyClient, export_singlefile_via_cdp_proxy, export_structured_via_cdp_proxy
+from .cdp_proxy_export import CdpProxyClient, export_singlefile_via_cdp_proxy
 from .ctrip_http import (
     CtripImCdpFetchClient,
     CtripImDetailHttpClient,
@@ -219,7 +219,7 @@ def cmd_run_export(
     kind: str,
     formats: str | None = None,
     output: str | None = None,
-    via: str = "cdp",
+    via: str = "http",
     request_budget: int | None = None,
     request_ledger: str | None = None,
 ) -> int:
@@ -227,7 +227,7 @@ def cmd_run_export(
     if request_ledger and budget_limit is None:
         raise RuntimeError("export request-ledger 必须配合 request-budget 使用")
     if (request_budget is not None or request_ledger) and not (kind == "structured" and via == "http"):
-        raise RuntimeError("export request-budget/request-ledger 只支持 structured --via http；CDP/SingleFile/links 路径无法精确计数")
+        raise RuntimeError("export request-budget/request-ledger 只支持 structured --via http；SingleFile/links 路径无法精确计数")
     store = StateStore(Path(cfg.state_file))
     sessions = store.filtered_sessions()
     if not sessions:
@@ -245,7 +245,9 @@ def cmd_run_export(
         return 0
 
     budget = _make_request_budget(budget_limit, request_ledger, "export")
-    if kind == "structured" and via == "http":
+    if kind == "structured":
+        if via != "http":
+            raise RuntimeError("structured export 已剥离 CDP/Selenium DOM 抓取路径，只支持 --via http")
         selected_formats = _parse_csv(formats) or ["json"]
         invalid = [f for f in selected_formats if f not in {"json", "markdown"}]
         if invalid:
@@ -272,12 +274,6 @@ def cmd_run_export(
     proxy = CdpProxyClient(cfg.cdp_proxy_base_url)
     if kind == "singlefile":
         success, failed = export_singlefile_via_cdp_proxy(proxy, repo_root, cfg, sessions, logger.info)
-    elif kind == "structured":
-        selected_formats = _parse_csv(formats) or ["json"]
-        invalid = [f for f in selected_formats if f not in {"json", "markdown"}]
-        if invalid:
-            raise RuntimeError(f"未知结构化导出格式: {', '.join(invalid)}")
-        success, failed = export_structured_via_cdp_proxy(proxy, repo_root, cfg, sessions, selected_formats, logger.info)
     else:
         raise RuntimeError(f"未知导出类型: {kind}")
     summary.success = success
@@ -535,7 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--kind", choices=["singlefile", "structured", "links"], required=True)
     export.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
     export.add_argument("--output", default=None, help="links 导出路径")
-    export.add_argument("--via", choices=["cdp", "http"], default="cdp", help="structured 导出方式；http=纯 requests")
+    export.add_argument("--via", choices=["http"], default="http", help="structured 导出方式；只支持纯 HTTP 请求")
     export.add_argument("--request-budget", type=int, default=None, help="本次 HTTP export 最多允许发出的携程接口请求数，最大 30")
     export.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
 

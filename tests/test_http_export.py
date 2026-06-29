@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
+import time
+from typing import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import pytest
 import yaml
 
 from im_archive_cli.config import AppConfig
@@ -53,6 +57,111 @@ class FakeDetailClient:
                 }
             ],
         }
+
+
+def test_http_defaults_use_max_probed_page_size_and_batch_throttle() -> None:
+    cfg = AppConfig()
+
+    assert cfg.page_size == 1000
+    assert cfg.concurrency == 4
+    assert cfg.window_sec == 2
+
+
+def test_export_structured_via_http_batches_four_requests_per_half_second(tmp_path: Path) -> None:
+    cfg = AppConfig(output_dir=str(tmp_path / "out"), failures_file=str(tmp_path / "failures.jsonl"))
+    sessions = [
+        SessionRecord(session_id=f"s{i}", cs_name="Alice", create_time="2026-06-16 09:00:00").normalized()
+        for i in range(1, 6)
+    ]
+
+    class TimedClient:
+        def __init__(self) -> None:
+            self.calls: list[float] = []
+
+        def fetch_conversation(self, session: SessionRecord) -> dict:
+            self.calls.append(time.monotonic())
+            return {
+                "sessionId": session.session_id,
+                "csName": session.cs_name,
+                "detailUrl": session.detail_url,
+                "createTime": session.create_time,
+                "messages": [
+                    {
+                        "sequence": 1,
+                        "timestampText": "2026-06-16 09:00:00",
+                        "senderRole": "buyer",
+                        "senderName": "Guest",
+                        "messageType": "text",
+                        "text": "hello",
+                        "rawHtml": "",
+                        "attachments": [],
+                    }
+                ],
+            }
+
+    client = TimedClient()
+
+    success, failed = export_structured_via_http(client, cfg, sessions, ["json"], lambda _msg: None)
+
+    assert (success, failed) == (5, 0)
+    assert len(client.calls) == 5
+    assert max(client.calls[:4]) - min(client.calls[:4]) < 0.5
+    assert client.calls[4] - min(client.calls[:4]) >= 0.35
+
+
+def test_export_structured_via_http_uses_dedicated_clients_for_http_detail_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = AppConfig(output_dir=str(tmp_path / "out"), failures_file=str(tmp_path / "failures.jsonl"), window_sec=0, concurrency=2)
+    sessions = [
+        SessionRecord(session_id=f"s{i}", cs_name="Alice", create_time="2026-06-16 09:00:00").normalized()
+        for i in range(1, 5)
+    ]
+
+    class TrackingDetailClient:
+        init_records: list[float] = []
+        request_touched: list[int] = []
+
+        def __init__(
+            self,
+            cfg: AppConfig,
+            log: Callable[[str], None] | None = None,
+            request_interval_sec: float = 0.5,
+            request_budget: object | None = None,
+        ) -> None:
+            self.cfg = cfg
+            self.log = log
+            self.request_budget = request_budget
+            TrackingDetailClient.init_records.append(float(request_interval_sec))
+
+        def fetch_conversation(self, session: SessionRecord) -> dict:
+            TrackingDetailClient.request_touched.append(id(self))
+            return {
+                "sessionId": session.session_id,
+                "csName": session.cs_name,
+                "detailUrl": session.detail_url,
+                "messages": [
+                    {
+                        "sequence": 1,
+                        "timestampText": "2026-06-16 09:00:00",
+                        "senderRole": "buyer",
+                        "senderName": "Guest",
+                        "messageType": "text",
+                        "text": "hello",
+                        "rawHtml": "",
+                        "attachments": [],
+                    }
+                ],
+            }
+
+    monkeypatch.setattr("im_archive_cli.http_export.CtripImDetailHttpClient", TrackingDetailClient)
+
+    seed_client = TrackingDetailClient(cfg)
+    success, failed = export_structured_via_http(seed_client, cfg, sessions, ["json"], lambda _msg: None)
+
+    assert (success, failed) == (4, 0)
+    assert len(set(TrackingDetailClient.request_touched)) == len(sessions)
+    assert all(interval == 0 for interval in TrackingDetailClient.init_records[1:])
 
 
 def _start_local_detail_server(requests_seen: list[dict]) -> HTTPServer:
@@ -108,8 +217,75 @@ def test_export_structured_via_http_writes_json_and_markdown(tmp_path: Path) -> 
     assert "# 会话 s1" in md_files[0].read_text(encoding="utf-8")
 
 
+def test_export_structured_via_http_downloads_images_and_renders_markdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = AppConfig(
+        output_dir=str(tmp_path / "out"),
+        failures_file=str(tmp_path / "failures.jsonl"),
+        window_sec=0,
+        download_images=True,
+        image_max_workers=1,
+        image_request_interval_sec=0,
+    )
+    session = SessionRecord(session_id="s1", cs_name="Alice", create_time="2026-06-16 09:00:00").normalized()
+
+    class ImageMessageClient:
+        def fetch_conversation(self, session: SessionRecord) -> dict:
+            return {
+                "sessionId": session.session_id,
+                "csName": session.cs_name,
+                "detailUrl": session.detail_url,
+                "messages": [
+                    {
+                        "sequence": 1,
+                        "timestampText": "2026-06-16 09:00:00",
+                        "senderRole": "buyer",
+                        "senderName": "Guest",
+                        "messageType": "image",
+                        "text": "",
+                        "rawHtml": "",
+                        "attachments": [
+                            {
+                                "src": "https://example.com/placeholder.png",
+                                "thumbSrc": "https://example.com/placeholder-thumb.png",
+                                "source": "messageBody",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    def fake_download_conversation_images(data: dict, conversation_dir: str | Path, base_name: str, _config: AppConfig, _log) -> None:
+        attachments = data["messages"][0]["attachments"]
+        asset_dir = Path(conversation_dir) / f"{base_name}_assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        asset_path = asset_dir / "seq0001_test.jpg"
+        asset_path.write_bytes(b"fake")
+        attachments[0]["localPath"] = str(asset_path)
+        attachments[0]["relativePath"] = f"{base_name}_assets/seq0001_test.jpg"
+        attachments[0]["downloadStatus"] = "downloaded"
+
+    monkeypatch.setattr(
+        "im_archive_cli.http_export.download_conversation_images",
+        fake_download_conversation_images,
+    )
+
+    success, failed = export_structured_via_http(ImageMessageClient(), cfg, [session], ["json", "markdown"], lambda _msg: None)
+
+    assert (success, failed) == (1, 0)
+    json_files = list((tmp_path / "out").rglob("*.json"))
+    md_files = list((tmp_path / "out").rglob("*.md"))
+    assert len(json_files) == 1
+    assert len(md_files) == 1
+    data = json.loads(json_files[0].read_text(encoding="utf-8"))
+    rel_path = data["messages"][0]["attachments"][0]["relativePath"]
+    assert rel_path == "IMChatlogExport_20260616090000_s1_Alice_assets/seq0001_test.jpg"
+    assert rel_path.endswith("_assets/seq0001_test.jpg")
+    markdown = md_files[0].read_text(encoding="utf-8")
+    assert f"![图片]({rel_path})" in markdown
+
+
 def test_export_structured_via_http_aborts_on_budget_exhaustion(tmp_path: Path) -> None:
-    cfg = AppConfig(output_dir=str(tmp_path / "out"), failures_file=str(tmp_path / "failures.jsonl"), window_sec=0)
+    cfg = AppConfig(output_dir=str(tmp_path / "out"), failures_file=str(tmp_path / "failures.jsonl"), window_sec=0, concurrency=1)
     sessions = [
         SessionRecord(session_id="s1", cs_name="Alice").normalized(),
         SessionRecord(session_id="s2", cs_name="Alice").normalized(),
@@ -153,6 +329,48 @@ def test_export_structured_via_http_treats_empty_messages_as_failure(tmp_path: P
     assert (success, failed) == (0, 1)
     assert "messages 为空" in (tmp_path / "failures.jsonl").read_text(encoding="utf-8")
     assert not list((tmp_path / "out").rglob("*.json"))
+
+
+def test_structured_export_via_cdp_is_rejected_by_parser(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = AppConfig(
+        state_file=str(tmp_path / "state.json"),
+        output_dir=str(tmp_path / "out"),
+        log_dir=str(tmp_path / "logs"),
+        failures_file=str(tmp_path / "failures.jsonl"),
+        window_sec=0,
+    )
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg.__dict__, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    StateStore(Path(cfg.state_file)).set_sessions(
+        [SessionRecord(session_id="s1", cs_name="Alice", create_time="2026-06-16 09:00:00")],
+        auto_select_all=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--config",
+                str(cfg_path),
+                "run",
+                "export",
+                "--kind",
+                "structured",
+                "--via",
+                "cdp",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert "invalid choice: 'cdp'" in captured.err
+
+
+def test_dom_structured_export_modules_are_removed() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    removed_dom_script = "detail" + "-page.js"
+
+    assert importlib.util.find_spec("im_archive_cli.export_structured") is None
+    assert not (repo_root / removed_dom_script).exists()
 
 
 def test_cli_http_export_uses_real_requests_client_against_local_endpoint(tmp_path: Path) -> None:
