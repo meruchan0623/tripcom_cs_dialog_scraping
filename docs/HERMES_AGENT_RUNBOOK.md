@@ -323,14 +323,32 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --
 
 ### 5.5 诊断纯 HTTP
 
+纯 HTTP 只作为诊断或加速路径，不替代默认 `--via cdp`。使用前先确认：
+
+- `imx auth status` 能找到可用 cookie header 或 auth JSON。
+- 1 请求预算 probe 不返回空体 `HTTP 403`。
+- 详情接口配置为 `https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession`，且 `ctrip_im_detail_verified_source: browser_detail_xhr`。
+
+本次浏览器抓包确认的请求头合同：
+
+- `13807/*` 列表接口来自 `vbooking.ctrip.com`，显式 header 为 `Accept: application/json, text/plain, */*`、`Content-Type: application/json;charset=UTF-8`、`appname: vbkbusiness`，浏览器自动补 `Origin: https://vbooking.ctrip.com`、`Referer: https://vbooking.ctrip.com/` 和 `.ctrip.com` 域 cookie。
+- `16037/getMessagesBySession` 详情接口来自 `imvendor.ctrip.com`，显式 header 为 `Content-Type: application/json`、`cookieOrigin: https://imvendor.ctrip.com`，浏览器自动补 `Origin: https://imvendor.ctrip.com`、`Referer: https://imvendor.ctrip.com/` 和 `.ctrip.com` 域 cookie。
+- 登录态不通过显式 `Authorization` 传输。不要在日志、文档、提交或工件中写入真实 cookie 值。
+
+先用小预算 probe：
+
 ```bash
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
   --start-date "$RUN_DATE" \
   --end-date "$RUN_DATE" \
-  --via http
+  --page-size 10 \
+  --max-pages 1 \
+  --via http \
+  --request-budget 1 \
+  --request-ledger ".im_archive/ctrip-request-ledger-${RUN_DATE}-http-probe.json"
 ```
 
-如果返回 `HTTP 403`，不要循环重试。回到 `--via cdp` 并检查登录页面状态。
+如果返回 `HTTP 401/403`，不要循环重试，也不要继续进入详情导出。记录为登录态新鲜度、浏览器 cookie 同步或风控层阻碍，回到 `--via cdp` 并检查登录页面状态。`messages` 为空不视为成功导出，必须记录失败样本并对照 `getMessagesBySession` 请求体和 header 合同。
 
 ## 6. 输出文件
 

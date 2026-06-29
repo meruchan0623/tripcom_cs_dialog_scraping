@@ -17,7 +17,15 @@ from .state import dedupe_sessions
 
 EMPLOYEE_URL = "https://m.ctrip.com/restapi/soa2/13807/getEmployeeDimMetricDetailsV3"
 SESSION_URL = "https://m.ctrip.com/restapi/soa2/13807/getSessionDimMetricDetailsV3"
-REFERER = "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience"
+VBOOKING_ORIGIN = "https://vbooking.ctrip.com"
+VBOOKING_REFERER = "https://vbooking.ctrip.com/"
+IMVENDOR_ORIGIN = "https://imvendor.ctrip.com"
+IMVENDOR_REFERER = "https://imvendor.ctrip.com/"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0"
+)
 KNOWN_NON_MESSAGE_DETAIL_ENDPOINTS = (
     "/15529/queryIMSessionInfo",
 )
@@ -154,19 +162,32 @@ def _summarize_cookie_header(cookie_header: str) -> dict[str, Any]:
     }
 
 
-def build_headers(cookie_header: str) -> dict[str, str]:
+def build_vbooking_headers(cookie_header: str) -> dict[str, str]:
     return {
         "accept": "application/json, text/plain, */*",
-        "content-type": "application/json;charset=utf-8",
-        "origin": "https://vbooking.ctrip.com",
-        "referer": REFERER,
+        "content-type": "application/json;charset=UTF-8",
+        "origin": VBOOKING_ORIGIN,
+        "referer": VBOOKING_REFERER,
         "appname": "vbkbusiness",
-        "user-agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-        ),
+        "user-agent": BROWSER_USER_AGENT,
         "cookie": cookie_header,
     }
+
+
+def build_imvendor_headers(cookie_header: str) -> dict[str, str]:
+    return {
+        "accept": "application/json, text/plain, */*",
+        "content-type": "application/json",
+        "origin": IMVENDOR_ORIGIN,
+        "referer": IMVENDOR_REFERER,
+        "cookieorigin": IMVENDOR_ORIGIN,
+        "user-agent": BROWSER_USER_AGENT,
+        "cookie": cookie_header,
+    }
+
+
+def build_headers(cookie_header: str) -> dict[str, str]:
+    return build_vbooking_headers(cookie_header)
 
 
 def build_employee_body(
@@ -179,9 +200,9 @@ def build_employee_body(
     return {
         "metricList": ["sev_session_count", "avg_work_duration", "avg_efficiency"],
         "searchMap": {},
-        "filterType": "fail",
+        "filterType": "",
         "orderColumn": "sev_session_count",
-        "orderType": "asc",
+        "orderType": "desc",
         "butype": cfg.ctrip_im_butype,
         "consultationScene": cfg.ctrip_im_consultation_scene,
         "startDate": start_date,
@@ -248,6 +269,9 @@ class CtripImHttpClient:
         self.request_interval_sec = max(0.0, float(request_interval_sec))
         self.request_budget = request_budget
 
+    def build_request_headers(self) -> dict[str, str]:
+        return build_vbooking_headers(self.cookie_header)
+
     def post_json(self, url: str, body: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
         elapsed = time.monotonic() - self.last_request_at
         if elapsed < self.request_interval_sec:
@@ -255,7 +279,7 @@ class CtripImHttpClient:
         if self.request_budget:
             self.request_budget.consume(url)
         try:
-            response = self.session.post(url, headers=build_headers(self.cookie_header), json=body, timeout=timeout)
+            response = self.session.post(url, headers=self.build_request_headers(), json=body, timeout=timeout)
         finally:
             self.last_request_at = time.monotonic()
         text = response.text
@@ -429,10 +453,17 @@ class CtripImCdpFetchClient(CtripImHttpClient):
 def build_detail_body(cfg: AppConfig, session: SessionRecord, page_no: int, page_size: int) -> dict[str, Any]:
     body: dict[str, Any] = {
         "sessionId": session.session_id,
-        "accountsource": "vbk",
-        "accountSource": "vbk",
-        "pageNo": int(page_no),
-        "pageSize": int(page_size),
+        "head": {
+            "cver": "2",
+            "extension": [
+                {"name": "cpc", "value": "pc"},
+                {"name": "protocal", "value": "https"},
+                {"name": "amp-product-type", "value": "IM"},
+                {"name": "amp-account-source", "value": "vbk"},
+                {"name": "client-source", "value": ""},
+                {"name": "locale", "value": "zh-CN"},
+            ],
+        },
     }
     extra = getattr(cfg, "ctrip_im_detail_extra_body", None)
     if isinstance(extra, dict):
@@ -441,6 +472,9 @@ def build_detail_body(cfg: AppConfig, session: SessionRecord, page_no: int, page
 
 
 class CtripImDetailHttpClient(CtripImHttpClient):
+    def build_request_headers(self) -> dict[str, str]:
+        return build_imvendor_headers(self.cookie_header)
+
     def fetch_conversation(self, session: SessionRecord, page_size: int | None = None, max_pages: int = 50) -> dict[str, Any]:
         url = str(self.cfg.ctrip_im_detail_messages_url or "").strip()
         if not url:

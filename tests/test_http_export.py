@@ -181,7 +181,8 @@ def test_cli_http_export_uses_real_requests_client_against_local_endpoint(tmp_pa
         assert rc == 0
         assert len(requests_seen) == 1
         assert requests_seen[0]["body"]["sessionId"] == "s1"
-        assert requests_seen[0]["body"]["pageNo"] == 1
+        assert requests_seen[0]["body"]["head"]["cver"] == "2"
+        assert {"name": "amp-account-source", "value": "vbk"} in requests_seen[0]["body"]["head"]["extension"]
         assert requests_seen[0]["cookie"] == "foo=bar"
         assert any("携程接口请求计数: used=1, limit=1" in line for line in logger.lines)
 
