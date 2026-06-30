@@ -50,6 +50,21 @@ class CtripRequestBudgetExceeded(RuntimeError):
     pass
 
 
+class CtripHttpError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        retry_after_sec: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+        self.retry_after_sec = retry_after_sec
+
+
 @dataclass
 class CtripRequestBudget:
     limit: int
@@ -257,12 +272,32 @@ def _response_error(data: Any, text: str) -> str:
     return text[:500]
 
 
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return max(0.0, seconds)
+
+
+def _http_status_retryable(status_code: int) -> bool:
+    return status_code == 429 or status_code in {500, 502, 503, 504}
+
+
+def _backoff_seconds(attempt: int, retry_after_sec: float | None = None) -> float:
+    if retry_after_sec is not None:
+        return retry_after_sec
+    return 0.5 * (2 ** max(0, attempt - 1))
+
+
 class CtripImHttpClient:
     def __init__(
         self,
         cfg: AppConfig,
         log: Callable[[str], None] | None = None,
-        request_interval_sec: float = 0.5,
+        request_interval_sec: float | None = None,
         session: requests.Session | None = None,
         request_budget: CtripRequestBudget | None = None,
     ):
@@ -271,35 +306,57 @@ class CtripImHttpClient:
         self.cookie_header, self.auth_source = load_cookie_header(cfg)
         self.session = session or requests.Session()
         self.last_request_at = 0.0
-        self.request_interval_sec = max(0.0, float(request_interval_sec))
+        interval = cfg.ctrip_request_interval_sec if request_interval_sec is None else request_interval_sec
+        self.request_interval_sec = max(0.0, float(interval))
         self.request_budget = request_budget
 
     def build_request_headers(self) -> dict[str, str]:
         return build_vbooking_headers(self.cookie_header)
 
     def post_json(self, url: str, body: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
-        elapsed = time.monotonic() - self.last_request_at
-        if elapsed < self.request_interval_sec:
-            time.sleep(self.request_interval_sec - elapsed)
-        if self.request_budget:
-            self.request_budget.consume(url)
-        try:
-            response = self.session.post(url, headers=self.build_request_headers(), json=body, timeout=timeout)
-        finally:
-            self.last_request_at = time.monotonic()
-        text = response.text
-        try:
-            data: Any = response.json()
-        except ValueError:
-            data = None
-        if not response.ok:
-            raise RuntimeError(f"携程接口请求失败：HTTP {response.status_code}，{_response_error(data, text)}")
-        if not isinstance(data, dict):
-            raise RuntimeError(f"携程接口返回非 JSON：{text[:300]}")
-        status = data.get("ResponseStatus")
-        if isinstance(status, dict) and status.get("Ack") not in (None, "Success"):
-            raise RuntimeError(f"携程接口返回失败：{_response_error(data, text)}")
-        return data
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            elapsed = time.monotonic() - self.last_request_at
+            if elapsed < self.request_interval_sec:
+                time.sleep(self.request_interval_sec - elapsed)
+            if self.request_budget:
+                self.request_budget.consume(url)
+            try:
+                response = self.session.post(url, headers=self.build_request_headers(), json=body, timeout=timeout)
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                self.last_request_at = time.monotonic()
+                if attempt >= max_attempts:
+                    raise CtripHttpError(f"携程接口网络失败：{exc}", retryable=True) from exc
+                time.sleep(_backoff_seconds(attempt))
+                continue
+            finally:
+                self.last_request_at = time.monotonic()
+
+            text = response.text
+            try:
+                data: Any = response.json()
+            except ValueError:
+                data = None
+            if not response.ok:
+                retryable = _http_status_retryable(int(response.status_code))
+                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                message = f"携程接口请求失败：HTTP {response.status_code}，{_response_error(data, text)}"
+                if retryable and attempt < max_attempts:
+                    time.sleep(_backoff_seconds(attempt, retry_after))
+                    continue
+                raise CtripHttpError(
+                    message,
+                    status_code=int(response.status_code),
+                    retryable=retryable,
+                    retry_after_sec=retry_after,
+                )
+            if not isinstance(data, dict):
+                raise RuntimeError(f"携程接口返回非 JSON：{text[:300]}")
+            status = data.get("ResponseStatus")
+            if isinstance(status, dict) and status.get("Ack") not in (None, "Success"):
+                raise RuntimeError(f"携程接口返回失败：{_response_error(data, text)}")
+            return data
+        raise RuntimeError("携程接口请求重试状态异常")
 
     def list_customer_services(self, start_date: str, end_date: str, page_size: int = 100) -> list[CustomerServiceAccount]:
         accounts: list[CustomerServiceAccount] = []
@@ -378,7 +435,7 @@ class CtripImCdpFetchClient(CtripImHttpClient):
         self,
         cfg: AppConfig,
         log: Callable[[str], None] | None = None,
-        request_interval_sec: float = 0.5,
+        request_interval_sec: float | None = None,
         target_id: str | None = None,
         request_budget: CtripRequestBudget | None = None,
     ):
@@ -386,7 +443,8 @@ class CtripImCdpFetchClient(CtripImHttpClient):
         self.log = log or (lambda _msg: None)
         self.session = requests.Session()
         self.last_request_at = 0.0
-        self.request_interval_sec = max(0.0, float(request_interval_sec))
+        interval = cfg.ctrip_request_interval_sec if request_interval_sec is None else request_interval_sec
+        self.request_interval_sec = max(0.0, float(interval))
         self.request_budget = request_budget
         self.cookie_header = ""
         self.auth_source = "cdp-page-fetch"

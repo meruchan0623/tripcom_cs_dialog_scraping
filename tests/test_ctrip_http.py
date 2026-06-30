@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 from im_archive_cli.config import AppConfig
 from im_archive_cli.ctrip_http import (
     CustomerServiceAccount,
+    CtripHttpError,
     CtripImDetailHttpClient,
     CtripImHttpClient,
     CtripRequestBudget,
@@ -270,6 +272,112 @@ def test_request_budget_zero_blocks_first_http_request(tmp_path) -> None:
     with pytest.raises(CtripRequestBudgetExceeded):
         client.post_json("https://m.ctrip.com/restapi/soa2/13807/blocked", {})
     assert fake_session.calls == 0
+
+
+def test_http_client_retries_429_then_returns_success(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=bar", encoding="utf-8")
+    cfg = AppConfig(ctrip_cookie_header_file=str(cookie_file), ctrip_auth_json=str(tmp_path / "missing.json"))
+
+    class FakeResponse:
+        def __init__(self, status_code: int, text: str, headers: dict[str, str] | None = None) -> None:
+            self.status_code = status_code
+            self.text = text
+            self.headers = headers or {}
+            self.ok = status_code < 400
+
+        def json(self) -> dict:
+            return __import__("json").loads(self.text)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(429, '{"message":"too many"}', {"Retry-After": "1"})
+            return FakeResponse(200, '{"ResponseStatus":{"Ack":"Success"},"ok":true}')
+
+    slept: list[float] = []
+    monkeypatch.setattr("im_archive_cli.ctrip_http.time.sleep", lambda seconds: slept.append(seconds))
+    fake = FakeSession()
+    client = CtripImHttpClient(cfg, session=fake, request_interval_sec=0)
+
+    data = client.post_json("https://m.ctrip.com/restapi/soa2/13807/example", {})
+
+    assert data["ok"] is True
+    assert fake.calls == 2
+    assert slept == [1.0]
+
+
+def test_http_client_does_not_retry_403(tmp_path) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=bar", encoding="utf-8")
+    cfg = AppConfig(ctrip_cookie_header_file=str(cookie_file), ctrip_auth_json=str(tmp_path / "missing.json"))
+
+    class FakeResponse:
+        ok = False
+        status_code = 403
+        text = '{"message":"forbidden"}'
+        headers: dict[str, str] = {}
+
+        def json(self) -> dict:
+            return {"message": "forbidden"}
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            return FakeResponse()
+
+    fake = FakeSession()
+    client = CtripImHttpClient(cfg, session=fake, request_interval_sec=0)
+
+    with pytest.raises(CtripHttpError) as exc:
+        client.post_json("https://m.ctrip.com/restapi/soa2/13807/example", {})
+
+    assert fake.calls == 1
+    assert exc.value.status_code == 403
+    assert exc.value.retryable is False
+
+
+def test_http_client_retries_timeout_once(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=bar", encoding="utf-8")
+    cfg = AppConfig(ctrip_cookie_header_file=str(cookie_file), ctrip_auth_json=str(tmp_path / "missing.json"))
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+        text = '{"ResponseStatus":{"Ack":"Success"},"ok":true}'
+        headers: dict[str, str] = {}
+
+        def json(self) -> dict:
+            return {"ResponseStatus": {"Ack": "Success"}, "ok": True}
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise requests.Timeout("network slow")
+            return FakeResponse()
+
+    slept: list[float] = []
+    monkeypatch.setattr("im_archive_cli.ctrip_http.time.sleep", lambda seconds: slept.append(seconds))
+    fake = FakeSession()
+    client = CtripImHttpClient(cfg, session=fake, request_interval_sec=0)
+
+    data = client.post_json("https://m.ctrip.com/restapi/soa2/13807/example", {})
+
+    assert data["ok"] is True
+    assert fake.calls == 2
+    assert slept == [0.5]
 
 
 def test_request_budget_ledger_persists_used_count(tmp_path) -> None:

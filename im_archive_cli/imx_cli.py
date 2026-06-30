@@ -30,14 +30,18 @@ from .xlsx_io import export_links_xlsx, import_links_xlsx, preview_sessions
 MAX_CTRIP_REQUEST_BUDGET = 30
 
 
-def _normalize_request_budget(value: int | None, context: str) -> int | None:
+def _request_budget_max(cfg: AppConfig) -> int:
+    return max(1, int(getattr(cfg, "ctrip_request_budget_max", MAX_CTRIP_REQUEST_BUDGET) or MAX_CTRIP_REQUEST_BUDGET))
+
+
+def _normalize_request_budget(value: int | None, context: str, max_budget: int = MAX_CTRIP_REQUEST_BUDGET) -> int | None:
     if value is None:
         return None
     limit = int(value)
     if limit < 0:
         raise RuntimeError(f"{context} request-budget 不能为负数")
-    if limit > MAX_CTRIP_REQUEST_BUDGET:
-        raise RuntimeError(f"为避免超过携程限制，{context} request-budget 不能超过 {MAX_CTRIP_REQUEST_BUDGET}")
+    if limit > max_budget:
+        raise RuntimeError(f"为避免超过携程限制，{context} request-budget 不能超过 {max_budget}")
     return limit
 
 
@@ -52,6 +56,23 @@ def _make_request_budget(limit: int | None, ledger_path: str | None, context: st
 
 def _parse_csv(value: str | None) -> list[str]:
     return [x.strip() for x in (value or "").split(",") if x.strip()]
+
+
+def _apply_runtime_request_overrides(
+    cfg: AppConfig,
+    *,
+    concurrency: int | None = None,
+    request_interval_sec: float | None = None,
+    structured: bool = False,
+) -> None:
+    if concurrency is not None:
+        cfg.concurrency = max(1, int(concurrency))
+    if request_interval_sec is not None:
+        interval = max(0.0, float(request_interval_sec))
+        if structured:
+            cfg.structured_request_interval_sec = interval
+        else:
+            cfg.ctrip_request_interval_sec = interval
 
 
 def _make_controller(cfg: AppConfig) -> CDPPluginController:
@@ -123,7 +144,10 @@ def cmd_run_collect_http(
     via: str = "http",
     request_budget: int | None = None,
     request_ledger: str | None = None,
+    concurrency: int | None = None,
+    request_interval_sec: float | None = None,
 ) -> int:
+    _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec)
     if not start_date or not end_date:
         default_start, default_end = default_date_range()
         start_date = start_date or default_start
@@ -131,13 +155,13 @@ def cmd_run_collect_http(
     size = int(page_size or cfg.page_size)
     max_page = int(max_pages or cfg.max_pages)
     include_roles = set(_parse_csv(include)) if include else None
-    budget_limit = _normalize_request_budget(request_budget, "collect")
+    budget_limit = _normalize_request_budget(request_budget, "collect", _request_budget_max(cfg))
     budget = _make_request_budget(budget_limit, request_ledger, "collect")
     if via == "cdp":
-        client = CtripImCdpFetchClient(cfg, log=logger.info, request_budget=budget)
+        client = CtripImCdpFetchClient(cfg, log=logger.info, request_interval_sec=request_interval_sec, request_budget=budget)
         logger.info(f"使用 CDP 页面上下文模拟前端请求采集: {start_date} -> {end_date}, page_size={size}, max_pages={max_page}")
     else:
-        client = CtripImHttpClient(cfg, log=logger.info, request_budget=budget)
+        client = CtripImHttpClient(cfg, log=logger.info, request_interval_sec=request_interval_sec, request_budget=budget)
         logger.info(f"使用 HTTP 模拟前端请求采集: {start_date} -> {end_date}, page_size={size}, max_pages={max_page}")
     try:
         sessions = client.collect_sessions(start_date, end_date, page_size=size, max_pages=max_page, include_roles=include_roles)
@@ -156,6 +180,7 @@ def cmd_run_collect_browser(cfg: AppConfig, logger, page_size: int | None, max_p
     config_payload = {
         "concurrency": int(cfg.concurrency or 20),
         "delayBetweenSaves": int(max(1, int(cfg.window_sec or 20)) * 1000),
+        "delayBetweenPages": int(cfg.browser_delay_between_pages_ms),
     }
     if page_size:
         config_payload["pageSize"] = int(page_size)
@@ -222,8 +247,11 @@ def cmd_run_export(
     via: str = "http",
     request_budget: int | None = None,
     request_ledger: str | None = None,
+    concurrency: int | None = None,
+    request_interval_sec: float | None = None,
 ) -> int:
-    budget_limit = _normalize_request_budget(request_budget, "export")
+    _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
+    budget_limit = _normalize_request_budget(request_budget, "export", _request_budget_max(cfg))
     if request_ledger and budget_limit is None:
         raise RuntimeError("export request-ledger 必须配合 request-budget 使用")
     if (request_budget is not None or request_ledger) and not (kind == "structured" and via == "http"):
@@ -284,6 +312,88 @@ def cmd_run_export(
     return 0
 
 
+def _load_retry_failure_session_ids(failures_file: Path, kind: str, retryable_only: bool, session_id: str | None) -> list[str]:
+    if not failures_file.exists():
+        raise RuntimeError(f"失败账本不存在: {failures_file}")
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in failures_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") not in {kind, f"{kind}_http"}:
+            continue
+        sid = str(item.get("session_id") or "").strip()
+        if not sid or sid in seen:
+            continue
+        if session_id and sid != session_id:
+            continue
+        if retryable_only and item.get("retryable") is not True:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
+def cmd_run_retry_failures(
+    cfg: AppConfig,
+    logger,
+    kind: str,
+    formats: str | None = None,
+    retryable_only: bool = False,
+    session_id: str | None = None,
+    request_budget: int | None = None,
+    request_ledger: str | None = None,
+    concurrency: int | None = None,
+    request_interval_sec: float | None = None,
+) -> int:
+    _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
+    if kind != "structured":
+        raise RuntimeError("retry-failures 目前只支持 --kind structured")
+    budget_limit = _normalize_request_budget(request_budget, "retry-failures", _request_budget_max(cfg))
+    if request_ledger and budget_limit is None:
+        raise RuntimeError("retry-failures request-ledger 必须配合 request-budget 使用")
+
+    retry_ids = _load_retry_failure_session_ids(Path(cfg.failures_file), "structured_http", retryable_only, session_id)
+    if not retry_ids:
+        logger.info("没有匹配的失败项需要重跑")
+        return 0
+
+    sessions_by_id = {session.session_id: session for session in StateStore(Path(cfg.state_file)).get_sessions()}
+    sessions = [sessions_by_id[sid] for sid in retry_ids if sid in sessions_by_id]
+    missing = [sid for sid in retry_ids if sid not in sessions_by_id]
+    if missing:
+        logger.info(f"跳过 state 中不存在的失败会话: {len(missing)}")
+    if not sessions:
+        raise RuntimeError("失败账本中的会话不在当前 state 中，请先 run collect/import links")
+
+    budget = _make_request_budget(budget_limit, request_ledger, "retry-failures")
+    if budget and budget.remaining < len(sessions):
+        raise RuntimeError(
+            "retry-failures request-budget 剩余额度不足："
+            f"remaining={budget.remaining}, retry_sessions={len(sessions)}；"
+            "已在发出任何携程详情请求前停止"
+        )
+
+    selected_formats = _parse_csv(formats) or ["json"]
+    invalid = [f for f in selected_formats if f not in {"json", "markdown"}]
+    if invalid:
+        raise RuntimeError(f"未知结构化导出格式: {', '.join(invalid)}")
+    client = CtripImDetailHttpClient(cfg, log=logger.info, request_budget=budget)
+    try:
+        success, failed = export_structured_via_http(client, cfg, sessions, selected_formats, logger.info, resume_from_state=False)
+    finally:
+        if budget:
+            logger.info(f"携程接口请求计数: used={budget.used}, limit={budget.limit}")
+    logger.info(f"失败重跑结束: kind={kind} success={success} failed={failed}")
+    return 0
+
+
 def cmd_import_links(cfg: AppConfig, file_path: Path, preview_only: bool, confirm: bool) -> int:
     if not file_path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
@@ -339,7 +449,7 @@ def cmd_discover_detail_xhr(
     cdp_base_url: str | None = None,
     request_ledger: str | None = None,
 ) -> int:
-    budget_limit = _normalize_request_budget(request_budget, "detail-xhr")
+    budget_limit = _normalize_request_budget(request_budget, "detail-xhr", _request_budget_max(cfg))
     assert budget_limit is not None
     budget = _make_request_budget(budget_limit, request_ledger, "detail-xhr")
     effective_limit = budget.remaining if budget else budget_limit
@@ -429,8 +539,8 @@ def cmd_discover_cdp_status(cfg: AppConfig, cdp_base_url: str | None = None, via
     return 0
 
 
-def cmd_request_budget_status(request_budget: int, request_ledger: str) -> int:
-    limit = _normalize_request_budget(request_budget, "request-budget")
+def cmd_request_budget_status(cfg: AppConfig, request_budget: int, request_ledger: str) -> int:
+    limit = _normalize_request_budget(request_budget, "request-budget", _request_budget_max(cfg))
     assert limit is not None
     budget = CtripRequestBudget(limit, ledger_path=Path(request_ledger))
     print(
@@ -450,7 +560,7 @@ def cmd_request_budget_status(request_budget: int, request_ledger: str) -> int:
 
 
 def cmd_preflight(cfg: AppConfig, request_budget: int, request_ledger: str, via: str = "proxy", cdp_base_url: str | None = None) -> int:
-    limit = _normalize_request_budget(request_budget, "preflight")
+    limit = _normalize_request_budget(request_budget, "preflight", _request_budget_max(cfg))
     assert limit is not None
     budget = CtripRequestBudget(limit, ledger_path=Path(request_ledger))
     issues: list[str] = []
@@ -525,6 +635,8 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--end-date", default=None, help="YYYY-MM-DD，默认同 start-date")
     collect.add_argument("--include", default=None, help="逗号分隔客服账号/昵称/显示名")
     collect.add_argument("--via", choices=["cdp", "http", "browser"], default="cdp", help="cdp=已登录页面内 fetch；http=纯 requests；browser=旧扩展点击采集")
+    collect.add_argument("--concurrency", type=int, default=None, help="覆盖本次运行请求线程数/并发数；不传则使用 config.yaml")
+    collect.add_argument("--request-interval-sec", type=float, default=None, help="覆盖本次采集单 client 请求间隔秒数；不传则使用 config.yaml")
     collect.add_argument("--request-budget", type=int, default=None, help="本次 collect 最多允许发出的携程接口请求数，最大 30")
     collect.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
     export = run_sub.add_parser("export")
@@ -532,8 +644,19 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
     export.add_argument("--output", default=None, help="links 导出路径")
     export.add_argument("--via", choices=["http"], default="http", help="structured 导出方式；只支持纯 HTTP 请求")
+    export.add_argument("--concurrency", type=int, default=None, help="覆盖本次结构化导出请求线程数/并发数；不传则使用 config.yaml")
+    export.add_argument("--request-interval-sec", type=float, default=None, help="覆盖本次结构化导出 worker 内请求间隔秒数；不传则使用 config.yaml")
     export.add_argument("--request-budget", type=int, default=None, help="本次 HTTP export 最多允许发出的携程接口请求数，最大 30")
     export.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
+    retry_failures = run_sub.add_parser("retry-failures")
+    retry_failures.add_argument("--kind", choices=["structured"], required=True)
+    retry_failures.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
+    retry_failures.add_argument("--retryable-only", action="store_true", help="只重跑 failure 中 retryable=true 的会话")
+    retry_failures.add_argument("--session-id", default=None, help="只重跑指定 session_id")
+    retry_failures.add_argument("--concurrency", type=int, default=None, help="覆盖本次重跑请求线程数/并发数；不传则使用 config.yaml")
+    retry_failures.add_argument("--request-interval-sec", type=float, default=None, help="覆盖本次重跑 worker 内请求间隔秒数；不传则使用 config.yaml")
+    retry_failures.add_argument("--request-budget", type=int, default=None, help="本次 retry 最多允许发出的携程接口请求数，最大 30")
+    retry_failures.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
 
     roles = sub.add_parser("roles")
     roles_sub = roles.add_subparsers(dest="roles_command")
@@ -602,6 +725,7 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
         if args.via == "browser":
             if args.request_budget is not None or args.request_ledger:
                 raise RuntimeError("collect --via browser 旧插件路径无法精确执行 request-budget/request-ledger；请使用 --via cdp 或 --via http")
+            _apply_runtime_request_overrides(cfg, concurrency=args.concurrency, request_interval_sec=args.request_interval_sec)
             return cmd_run_collect_browser(cfg, logger, args.page_size, args.max_pages)
         return cmd_run_collect_http(
             cfg,
@@ -614,6 +738,8 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             via=args.via,
             request_budget=args.request_budget,
             request_ledger=args.request_ledger,
+            concurrency=args.concurrency,
+            request_interval_sec=args.request_interval_sec,
         )
     if args.command == "run" and args.run_command == "export":
         return cmd_run_export(
@@ -625,6 +751,21 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             via=args.via,
             request_budget=args.request_budget,
             request_ledger=args.request_ledger,
+            concurrency=args.concurrency,
+            request_interval_sec=args.request_interval_sec,
+        )
+    if args.command == "run" and args.run_command == "retry-failures":
+        return cmd_run_retry_failures(
+            cfg,
+            logger,
+            args.kind,
+            formats=args.formats,
+            retryable_only=args.retryable_only,
+            session_id=args.session_id,
+            request_budget=args.request_budget,
+            request_ledger=args.request_ledger,
+            concurrency=args.concurrency,
+            request_interval_sec=args.request_interval_sec,
         )
     if args.command == "roles" and args.roles_command == "list":
         return cmd_roles_list(cfg)
@@ -651,7 +792,7 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
     if args.command == "discover" and args.discover_command == "cdp-status":
         return cmd_discover_cdp_status(cfg, args.cdp_base_url, via=args.via)
     if args.command == "request-budget" and args.request_budget_command == "status":
-        return cmd_request_budget_status(args.request_budget, args.request_ledger)
+        return cmd_request_budget_status(cfg, args.request_budget, args.request_ledger)
     if args.command == "preflight":
         return cmd_preflight(cfg, args.request_budget, args.request_ledger, via=args.via, cdp_base_url=args.cdp_base_url)
     if args.command == "self-test" and args.self_test_command == "http-export":

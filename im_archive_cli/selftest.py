@@ -71,7 +71,8 @@ def run_http_export_selftest(base_dir: Path, request_budget: int = 1) -> dict[st
         budget = CtripRequestBudget(request_budget, ledger_path=ledger_path)
         client = CtripImDetailHttpClient(cfg, request_interval_sec=0, request_budget=budget)
         success, failed = export_structured_via_http(client, cfg, [session.normalized()], ["json", "markdown"], lambda _msg: None)
-        json_files = [str(path) for path in Path(cfg.output_dir).rglob("*.json")]
+        json_files = [str(path) for path in Path(cfg.output_dir).rglob("*.json") if not path.name.endswith(".image-index.json")]
+        image_index_files = [str(path) for path in Path(cfg.output_dir).rglob("*.image-index.json")]
         markdown_files = [str(path) for path in Path(cfg.output_dir).rglob("*.md")]
         return {
             "ok": success == 1 and failed == 0 and len(_SelfTestDetailHandler.requests_seen) == 1,
@@ -88,6 +89,7 @@ def run_http_export_selftest(base_dir: Path, request_budget: int = 1) -> dict[st
             },
             "outputs": {
                 "json": json_files,
+                "imageIndex": image_index_files,
                 "markdown": markdown_files,
             },
         }

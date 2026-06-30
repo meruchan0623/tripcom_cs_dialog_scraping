@@ -33,6 +33,9 @@ class AppConfig:
     max_pages: int = 50
     concurrency: int = 4
     window_sec: int = 2
+    ctrip_request_interval_sec: float = 0.5
+    structured_request_interval_sec: float = 0.0
+    ctrip_request_budget_max: int = 30
     output_prefix: str = "IM_Archive"
     headless: bool = True
     timezone: str = "Asia/Shanghai"
@@ -44,6 +47,7 @@ class AppConfig:
     extension_runtime_dir: str = ".im_archive/runtime_extensions"
     chrome_state_file: str = ".im_archive/chrome_state.json"
     cdp_poll_interval_sec: float = 1.0
+    browser_delay_between_pages_ms: int = 120
     download_images: bool = True
     image_max_workers: int = 4
     image_request_interval_sec: float = 0.5

@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from im_archive_cli.config import AppConfig
+import im_archive_cli.imx_cli as imx_cli
 from im_archive_cli.imx_cli import cmd_import_links, cmd_roles_list, cmd_roles_select, cmd_run_collect_http, cmd_run_export, cmd_state_watch
 from im_archive_cli.models import SessionRecord
 from im_archive_cli.state import StateStore
@@ -122,6 +124,24 @@ def test_collect_rejects_request_budget_over_30_before_client_setup(tmp_path) ->
         )
 
 
+def test_collect_uses_configured_request_budget_max(tmp_path) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg.ctrip_request_budget_max = 10
+
+    with pytest.raises(RuntimeError, match="collect request-budget 不能超过 10"):
+        cmd_run_collect_http(
+            cfg,
+            DummyLogger(),
+            page_size=1,
+            max_pages=1,
+            start_date="2026-06-16",
+            end_date="2026-06-16",
+            include=None,
+            via="http",
+            request_budget=11,
+        )
+
+
 def test_http_export_rejects_negative_request_budget_before_state_read(tmp_path) -> None:
     cfg = make_cfg(tmp_path)
 
@@ -194,6 +214,44 @@ def test_main_prints_clean_error_for_request_budget_over_30(tmp_path, capsys) ->
     assert rc == 1
     assert "collect request-budget 不能超过 30" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_collect_cli_overrides_request_interval(tmp_path, monkeypatch) -> None:
+    from im_archive_cli.imx_cli import main
+
+    cfg = make_cfg(tmp_path)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg.__dict__, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    captured: dict[str, float] = {}
+
+    class FakeClient:
+        def __init__(self, cfg: AppConfig, log=None, request_interval_sec=None, request_budget=None) -> None:
+            captured["interval"] = float(request_interval_sec)
+
+        def collect_sessions(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(imx_cli, "CtripImHttpClient", FakeClient)
+
+    rc = main(
+        [
+            "--config",
+            str(cfg_path),
+            "run",
+            "collect",
+            "--via",
+            "http",
+            "--start-date",
+            "2026-06-16",
+            "--end-date",
+            "2026-06-16",
+            "--request-interval-sec",
+            "2.5",
+        ]
+    )
+
+    assert rc == 0
+    assert captured == {"interval": 2.5}
 
 
 def test_main_auth_status_reports_sources_without_cookie_values(tmp_path, capsys) -> None:
