@@ -15,6 +15,7 @@ ctrip_request_budget_max: 30
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
+# Hermes Remote Debugging allocation: Ctrip/Tripcom main signed-in browser session.
 cdp_port: 9222
 chrome_path: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
 extension_id: ''

@@ -18,6 +18,8 @@ description: |
 3. 通过 Python state 完成角色筛选、链接表导出、结构化 JSON/Markdown 导出、SingleFile HTML 导出。
 4. 用命令输出和产物回读确认本次运行是否成功。
 
+Hermes Remote Debugging allocation: `9222` 固定给 Ctrip/Tripcom 主已登录浏览器会话。不要把 KKday、Klook、eSIM 或 Trip SKU cron 迁到这个端口；`ctrip-get-comment-cli` 可读取 `9222` 作为主 Ctrip 登录态，并只在缺认证时使用自己的 `9224` fallback。
+
 ## 已验证链路
 
 当前项目在 Hermes/Agent 机器上的已验证链路是：

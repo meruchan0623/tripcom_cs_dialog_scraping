@@ -2,6 +2,8 @@
 
 本文档给 Hermes Agent 运行机器使用，说明如何在本项目中采集携程客服历史咨询会话、导出对话详情、传入筛选参数、理解接口请求体，以及对结果做过滤分析。
 
+Remote Debugging 端口分配：`9222` 固定给 Ctrip/Tripcom 主已登录浏览器会话。`ctrip-get-comment-cli` 可复用 `9222` 做主认证检查，并保留 `9224` 作为评论导出的 Default profile fallback。KKday Hermes 自动任务不使用浏览器端口；Trip SKU/price cron 不预留固定 `922x` 端口。
+
 ## 1. 总览
 
 项目路径：
