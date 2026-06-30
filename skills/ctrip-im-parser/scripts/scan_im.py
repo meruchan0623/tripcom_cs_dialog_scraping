@@ -6,7 +6,7 @@ Pure data extraction from Ctrip IM conversation archives.
 Outputs structured JSON. Zero business logic baked in.
 
 Core capabilities:
-  1. Load & parse IMChatlogExport / IM_Archive JSON files (batch)
+  1. Load & parse IMChatlogExport conversation JSON files (batch)
   2. Extract messages with role, time, text, sequence
   3. Extract order cards embedded in rawHtml
   4. Filter by role / keyword / time range
@@ -22,7 +22,7 @@ Usage:
     python scan_im.py <dir> -o out.json              # Full export as JSON
     python scan_im.py <dir> --role buyer             # Customer messages only
     python scan_im.py <dir> --keyword "refund"       # Text search
-    python scan_im.py <dir> --after 2026-04-20       # Date filter
+    python scan_im.py <dir> --after 2026-06-16       # Date filter
     python scan_im.py <dir> --extract orders         # Pull order cards
     python scan_im.py <dir> --keyword "thanks" --ctx 3   # Match + 3 lines context
     python scan_im.py <dir> --seq-diff              # Show buyer→seller gaps per session
@@ -68,9 +68,34 @@ def extract_order(raw_html):
     return result or None
 
 
+def extract_inline_images(attachments):
+    """Extract message-body image references from an attachments list."""
+    if not isinstance(attachments, list):
+        return []
+    images = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        if item.get('source') != 'messageBody':
+            continue
+        if not item.get('src'):
+            continue
+        images.append({
+            'source': 'messageBody',
+            'src': item.get('src', '') or '',
+            'local_path': item.get('localPath', '') or '',
+            'relative_path': item.get('relativePath', '') or '',
+            'download_status': item.get('downloadStatus', '') or '',
+        })
+    return images
+
+
 def load_all_sessions(dir_path):
     """Load all JSON files from directory. Returns list of session dicts."""
-    files = sorted(glob.glob(os.path.join(dir_path, '**', '*.json'), recursive=True))
+    files = [
+        fp for fp in sorted(glob.glob(os.path.join(dir_path, '**', '*.json'), recursive=True))
+        if not fp.endswith('.image-index.json')
+    ]
     sessions = []
     for fp in files:
         data = load_session(fp)
@@ -78,6 +103,7 @@ def load_all_sessions(dir_path):
             continue
         msgs = []
         for m in data.get('messages', []):
+            inline_images = extract_inline_images(m.get('attachments'))
             entry = {
                 'sender_role': m.get('senderRole', ''),
                 'sender_name': m.get('senderName', ''),
@@ -86,9 +112,11 @@ def load_all_sessions(dir_path):
                 'sequence': m.get('sequence', 0),
                 'timestamp': m.get('timestampText', ''),
                 'has_attachments': bool(m.get('attachments')),
+                'inline_images': inline_images,
                 'order_card': extract_order(m.get('rawHtml', '')),
             }
             msgs.append(entry)
+        inline_image_count = sum(len(m['inline_images']) for m in msgs)
         sessions.append({
             'session_id': data.get('sessionId', ''),
             'cs_name': data.get('csName', ''),
@@ -97,6 +125,13 @@ def load_all_sessions(dir_path):
             'exported_at': data.get('exportedAt', ''),
             'filename': os.path.basename(fp),
             'message_count': len(msgs),
+            'inline_image_count': inline_image_count,
+            'failed_inline_image_count': sum(
+                1
+                for m in msgs
+                for image in m['inline_images']
+                if image['download_status'] == 'failed'
+            ),
             'messages': msgs,
         })
     return sessions
@@ -317,13 +352,13 @@ Examples:
   %(prog)s ./chat_logs -o full.json              Export everything
   %(prog)s ./chat_logs --role seller             Agent messages only
   %(prog)s "./dir path" --keyword refund         Search text
-  %(prog)s ./chat_logs --after 2026-04-20        From date onward
+  %(prog)s ./chat_logs --after 2026-06-16        From date onward
   %(prog)s ./chat_logs --extract orders          Pull order cards
   %(prog)s ./chat_logs -k thanks --ctx 2         Match + 2-msg context window
   %(prog)s ./chat_logs --seq-diff               Timing gaps between messages
 """,
     )
-    parser.add_argument('directory', help='Directory containing IM_Archive_*.json files')
+    parser.add_argument('directory', help='Directory containing IMChatlogExport_*.json files')
     parser.add_argument('-o', '--output', help='Write structured JSON output to file')
     parser.add_argument('--role', help='Filter messages by senderRole (buyer/seller/system)')
     parser.add_argument('--keyword', '-k', help='Case-insensitive substring search in message text + order cards')

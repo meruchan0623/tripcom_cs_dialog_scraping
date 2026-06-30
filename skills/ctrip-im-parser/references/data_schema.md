@@ -1,67 +1,129 @@
 # Ctrip IM JSON Data Schema Reference
 
-## Complete Field Reference
+## 存储布局
 
-### Session (Top-Level)
+```text
+<output_dir>/<yyyyMMdd>/<客服名>/
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.image-index.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.md
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>_assets/
+```
+
+`IMChatlogExport_*.json` 是主会话文件。`*.image-index.json` 是正文图片索引 sidecar，不是会话文件。
+
+## Session 顶层字段
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `sessionId` | string | 会话唯一 ID |
+| `csName` | string | 客服身份标识 |
+| `detailUrl` | string | 携程 IM 详情链接 |
+| `exportedAt` | string | ISO8601 导出时间 |
+| `title` | string | 通常为 `供应商客服工作台` |
+| `messages` | array | 消息数组，按 `sequence` 表示顺序 |
+
+## Message 字段
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `sequence` | int | 从 1 开始递增 |
+| `timestampText` | string | `YYYY-MM-DD HH:mm:ss` |
+| `senderRole` | string | `buyer` / `seller` / `system` |
+| `senderName` | string | system 消息可能为空 |
+| `messageType` | string | `text` / `image` / `unknown` |
+| `text` | string | 纯文本。图片通常为 `[图片]` |
+| `rawHtml` | string | 原始 HTML，可能含订单卡、翻译、引用 |
+| `attachments` | array | 图片或其他附件。正文图片见下节 |
+
+## 正文图片附件
+
+正文图片必须来自：
+
+```text
+messages[].attachments[] where source == "messageBody" and src exists
+```
+
+附件字段：
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `source` | string | 正文图片固定为 `messageBody` |
+| `src` | string | 原始远端图片 URL |
+| `thumbSrc` | string | 预览兜底，不能作为主入口 |
+| `localPath` | string | 本地绝对路径，存在时优先使用 |
+| `relativePath` | string | 相对会话 JSON 所在目录的路径 |
+| `downloadStatus` | string | `downloaded` / `failed` / 空 |
+
+路径读取顺序：
+
+1. `localPath`
+2. `json_file.parent / relativePath`
+3. `src` 远端 URL
+
+`downloadStatus == "failed"` 是图片级失败，不应直接判定会话导出失败。报告时记录 `sessionId + sequence + src`。
+
+## Image Index Sidecar
+
+`*.image-index.json` 结构：
 
 ```json
 {
-  "csName": "string",        // 客服身份标识
-  "detailUrl": "string",     // 携程IM原始链接
-  "exportedAt": "string",    // ISO8601导出时间
-  "sessionId": "string",     // 会话唯一ID（15位数字）
-  "title": "string",         // 固定值："供应商客服工作台"
-  "messages": []             // 消息数组
+  "sessionId": "s1",
+  "jsonPath": "/absolute/path/to/IMChatlogExport_20260616090000_s1_Alice.json",
+  "images": [
+    {
+      "sessionId": "s1",
+      "sequence": 1,
+      "messageType": "image",
+      "source": "messageBody",
+      "downloadStatus": "downloaded",
+      "src": "https://cdn.example.com/a.jpg",
+      "localPath": "/absolute/path/to/file.jpg",
+      "relativePath": "IMChatlogExport_..._assets/seq0001_a.jpg",
+      "resolvedPath": "/absolute/path/to/file.jpg"
+    }
+  ]
 }
 ```
 
-### Message Object — Full Schema
+用途：让 Agent 快速定位正文图片。它不包含完整聊天文本，不能替代会话 JSON。
 
-| Field | Type | Always Present | Notes |
-|-------|------|---------------|-------|
-| `attachments` | array | Yes | 图片消息时含 `[{alt, src}]` |
-| `csName` | string | Yes | 同顶层 |
-| `detailUrl` | string | Yes | 同顶层 |
-| `messageType` | string | Yes | `text` / `image` / `unknown` |
-| `rawHtml` | string | Yes | 原始HTML，含订单卡/翻译/引用 |
-| `senderName` | string | **No** | system消息可能为空 |
-| `senderRole` | string | Yes | `buyer` / `seller` / `system` |
-| `sequence` | int | Yes | 从1开始递增 |
-| `sessionId` | string | Yes | 同顶层 |
-| `text` | string | Yes | 纯文本，可能为空字符串 |
-| `timestampText` | string | Yes | 格式：`YYYY-MM-DD HH:mm:ss` |
+## 非正文图片
 
-### Order Card HTML Structure
+以下内容不要当作客人发送的正文图片：
 
-```
-messageType = "unknown"
-rawHtml contains: <div class="order-list">
+- 头像，例如 `infos[].avatar`
+- 商品卡片图
+- 订单卡片图
+- 任何 `source != "messageBody"` 的附件
+- 只有 `thumbSrc` 但没有 `src` 的附件
 
-Fields extracted from <div class="order-detail">:
-  - 来源渠道 (channel): App / H5 / 小程序
-  - 订单ID (order_id): 16位数字
-  - 产品名称 (product_name): eSIM产品描述
-  - 使用日期 (use_date): YYYY/MM/DD
-  - 订单总额 (amount): 数字（可能含小数）
+## Order Card HTML
+
+订单卡通常在 `rawHtml` 中：
+
+```html
+<div class="order-detail">
+  <dd>来源渠道：</span><span>App</span></dd>
+  <dd>订单ID：</span><span>1578946023985969</span></dd>
+  <dd>产品名称：</span><span>香港 5G eSIM | ...</span></dd>
+  <dd>使用日期：</span><span>2026/03/11</span></dd>
+  <dd>订单总额：</span><span>599.97</span></dd>
+</div>
 ```
 
-### Product Name Parsing Rules
+可提取字段：
 
-产品名称字段格式化较复杂，典型结构：
+- `channel`
+- `order_id`
+- `product_name`
+- `use_date`
+- `amount`
 
-```
-{地区} {网络} eSIM | {运营商}覆盖 | {特性描述} | QR Code-QR code-{天数}-{网络类型}-{计费方式}-{流量}
-```
+## Translation Block
 
-可提取的维度：
-- **地区**: 香港 / 中港澳 / 中国大陆 / ...
-- **天数**: 1-30天范围内的具体数字
-- **网络类型**: 5G / 4G / ...
-- **流量方案**: 每日-XGB / 总量+每日 / 无限流量 / ...
-
-### Translation Block in rawHtml
-
-客户消息自动包含 Google 翻译：
+客户消息可能在 `rawHtml` 中附带 Google 翻译：
 
 ```html
 <div class="tran-group">
@@ -72,11 +134,11 @@ Fields extracted from <div class="order-detail">:
 </div>
 ```
 
-注意：`text` 字段存储的是**客户原始语言**，翻译内容仅在 `rawHtml` 中。
+`text` 字段存储客户原始语言。翻译内容仅在 `rawHtml` 中。
 
-### Citation/Quote Block in rawHtml
+## Citation Block
 
-客服回复引用客户原文：
+客服回复可能引用客户原文：
 
 ```html
 <div class="cite-card-container">
@@ -88,12 +150,14 @@ Fields extracted from <div class="order-detail">:
 <p class="chat-text">{reply_text}</p>
 ```
 
-### System Messages
+分析客服回复时，不要把引用块误判成客服新写的正文。
 
-`senderRole=system` 的消息特征：
-- `senderName` 通常为空字符串
-- `text` 为空
-- 内容在 `rawHtml` 中，格式如：
-  ```
-  <span>{timestamp}</span>温馨提示：对于海外旅游供应商...
-  ```
+## System Messages
+
+`senderRole == "system"` 的常见特征：
+
+- `senderName` 为空
+- `text` 可能为空
+- 主要内容在 `rawHtml`
+
+响应时延统计通常应排除 system 消息。

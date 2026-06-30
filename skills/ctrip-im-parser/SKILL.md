@@ -1,214 +1,178 @@
 ---
 name: ctrip-im-parser
 description: |
-  解析携程IM客服对话JSON记录。当用户需要分析携程/ Trip平台导出的IM聊天记录、
-  客服对话质量评估、客户问题分类统计、会话时间分析、订单信息提取、
-  客服响应效率分析、或任何涉及IM_Archive_*.json文件的处理任务时触发此skill。
-  触发词：携程IM、IM Archive、客服对话、聊天记录解析、csName、senderRole、
-  携程导出对话、vbk_json、商家顾问对话、旅游管家对话、消息序列分析
+  Use when analyzing Trip.com/Ctrip IMChatlogExport JSON conversations,客服聊天记录解析、会话质量评估、客户问题分类、订单卡提取、响应时延统计、正文图片引用回读，或任何涉及 IMChatlogExport_*.json / *.image-index.json 的处理任务。
 ---
 
-# Ctrip IM Parser — 数据提取引擎
+# Ctrip IM Parser
 
-## 概述
+## 核心原则
 
-从携程/Trip平台导出的 **IMChatlogExport_*.json**（兼容历史 IM_Archive_*.json）文件中批量提取结构化数据。
+只做数据读取和结构化，不在脚本里写业务判断。业务分类、质检规则、话术合规判断由调用 Agent 在 prompt 层完成。
 
-> **设计原则：纯数据提取，零业务逻辑。**
-> 
-> 脚本只负责"把数据取出来并结构化"，所有分析判断逻辑由调用者（AI Agent）在 prompt 层动态决定。
+当前存储范式以会话 JSON 为主入口，图片 sidecar 为辅助入口：
 
-## 数据格式
-
-### 文件命名
+```text
+<output_dir>/<yyyyMMdd>/<客服名>/
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.image-index.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.md
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>_assets/
 ```
-IMChatlogExport_{会话创建时间yyyyMMddHHmmss}_{sessionId}_{客服名}.json
-```
 
-### JSON 结构（每个文件 = 1个会话）
+## 读取顺序
+
+1. 读取 `IMChatlogExport_*.json` 作为会话、消息、角色、订单卡和正文文本的权威来源。
+2. 需要正文图片时，优先读取同名 `*.image-index.json` 定位图片；也可从会话 JSON 的 `messages[].attachments[]` 回退。
+3. Markdown 仅用于展示或兜底，不作为程序分析主入口。
+4. 不要直接扫描 `_assets/` 目录推断图片语义；目录文件缺少 `sessionId`、`sequence`、`source`、`downloadStatus`。
+5. 扫描 JSON 时跳过 `*.image-index.json`，它不是会话文件。
+
+正文图片只认 `messages[].attachments[]` 中 `source == "messageBody"` 且存在 `src` 的附件。头像、商品卡片、订单卡片和其他非 `messageBody` 附件不能算作客人发送的正文图片。
+
+## 会话 JSON 结构
+
+每个 `IMChatlogExport_*.json` 是一个会话：
+
 ```json
 {
-  "csName": "vbk_2547307/门票活动旅游管家Jeffery Zhu",
-  "detailUrl": "https://imvendor.ctrip.com/queryMessages?...",
-  "exportedAt": "2026-04-27T04:19:41.006Z",
   "sessionId": "100001083736038",
+  "csName": "门票活动旅游管家Alice",
+  "detailUrl": "https://imvendor.ctrip.com/queryMessages?...",
+  "exportedAt": "2026-06-16T04:19:41.006Z",
   "title": "供应商客服工作台",
   "messages": [
     {
-      "senderRole":    "buyer | seller | system",
-      "senderName":   "_tisg******tbgrw8 (脱敏)",
-      "messageType":  "text | image | unknown",
-      "text":         "纯文本正文",
-      "rawHtml":      "原始HTML（含订单卡/翻译/引用）",
-      "sequence":     1,
-      "timestampText":"2026-04-24 08:09:47",
-      "attachments":  [{"src": "...", "alt": "..."}]
+      "sequence": 1,
+      "timestampText": "2026-06-16 09:00:00",
+      "senderRole": "buyer",
+      "senderName": "_tisg******tbgrw8",
+      "messageType": "text",
+      "text": "纯文本正文",
+      "rawHtml": "原始 HTML，可能含订单卡、翻译、引用",
+      "attachments": []
     }
   ]
 }
 ```
 
-### 嵌入 rawHtml 的订单卡
-```html
-<div class="order-detail">
-  <dd>来源渠道：</span><span>App</span></dd>
-  <dd>订单ID：</span><span>1578946023985969</span></dd>
-  <dd>产品名称：</span><span>香港 5G eSIM | ...</span></dd>
-  <dd>使用日期：</span><span>2026/03/11</span></dd>
-  <dd>订单总额：</span><span>599.97</span></dd>
-</div>
-```
-
-## 脚本使用
-
-### 位置
-```
-{SKILL_DIR}/scripts/scan_im.py
-```
-
-运行方式：
-```bash
-python {SKILL_DIR}/scripts/scan_im.py <目录路径> [参数...]
-```
-
-### 核心参数
-
-| 参数 | 说明 |
-|------|------|
-| `<directory>` | 导出根目录路径（必填）。支持递归扫描，建议传入 `IMChatlogExport/` 根目录 |
-| `-o FILE` / `--output FILE` | 输出为结构化 JSON 文件（否则输出摘要到 stdout） |
-| `--role ROLE` | 按 senderRole 过滤: `buyer` / `seller` / `system` |
-| `--keyword TEXT` / `-k TEXT` | 在消息文本 + 订单卡中做大小写不敏感子串搜索 |
-| `--after DATE` | 只保留 >= YYYY-MM-DD 的消息 |
-| `--before DATE` | 只保留 <= YYYY-MM-DD 的消息 |
-| `--extract orders` | 从 rawHtml 中提取嵌入的订单卡信息 |
-| `--ctx N` | 为每条匹配消息生成前后各 N 条消息的上下文窗口 |
-| `--seq-diff` | 计算相邻消息之间的时间间隔 |
-
-### 输出格式（-o 模式）
+图片消息附件示例：
 
 ```json
 {
-  "statistics": {
-    "sessions": 462,
-    "total_messages": 6726,
-    "by_role": {"buyer": 2340, "seller": 3320, "system": 1066},
-    "by_type": {"text": 5100, "image": 200, "unknown": 1426},
-    "time_earliest": "2026-04-07 10:16:33",
-    "time_latest": "2026-04-25 19:40:43",
-    "avg_message_length_chars": 85.3,
-    "language_distribution": {"en": 2100, "zh": 1500, "th": 800, ...},
-    "sessions_with_order_cards": 380,
-    "total_order_amount": 125430.50
-  },
-  "sessions": [ ... ]  // 完整会话数据数组
-}
-```
-
-### 特殊输出模式
-
-#### --ctx N（上下文窗口模式）
-每条匹配消息附带前后 N 条邻居消息：
-```json
-{
-  "context_matches": [
+  "sequence": 3,
+  "messageType": "image",
+  "text": "[图片]",
+  "attachments": [
     {
-      "session_id": "100001083736038",
-      "matched_index": 5,
-      "context_before": [...N条前文...],
-      "target_message": { "sender_role": "seller", "text": "...", ... },
-      "context_after": [...N条后文...]
+      "source": "messageBody",
+      "src": "https://cdn.example.com/a.jpg",
+      "thumbSrc": "https://cdn.example.com/thumb.jpg",
+      "localPath": "/absolute/path/IMChatlogExport_..._assets/seq0003_a.jpg",
+      "relativePath": "IMChatlogExport_..._assets/seq0003_a.jpg",
+      "downloadStatus": "downloaded"
     }
   ]
 }
 ```
 
-#### --seq-diff（时间间隔模式）
-计算每对相邻消息的时间差：
+## 脚本入口
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py <导出目录> [参数...]
+```
+
+常用参数：
+
+| 参数 | 用途 |
+| --- | --- |
+| `-o FILE` | 输出结构化 JSON |
+| `--role buyer/seller/system` | 按发言角色过滤 |
+| `-k TEXT` / `--keyword TEXT` | 在正文和订单卡字段中搜索 |
+| `--after YYYY-MM-DD` | 只保留该日及之后消息 |
+| `--before YYYY-MM-DD` | 只保留该日及之前消息 |
+| `--extract orders` | 从 `rawHtml` 提取订单卡 |
+| `--ctx N` | 输出匹配消息前后 N 条上下文 |
+| `--seq-diff` | 计算相邻消息时间差 |
+
+脚本会递归读取会话 JSON，并跳过 `*.image-index.json`。输出消息会包含：
+
 ```json
 {
-  "timing_gaps": [
+  "sender_role": "buyer",
+  "msg_type": "image",
+  "text": "[图片]",
+  "sequence": 3,
+  "timestamp": "2026-06-16 09:01:00",
+  "has_attachments": true,
+  "inline_images": [
     {
-      "session_id": "100001083736038",
-      "gaps": [
-        {"from_seq":1, "to_seq":2, "from_role":"buyer", "to_role":"system", "gap_seconds":2},
-        {"from_seq":4, "to_seq":5, "from_role":"buyer", "to_role":"seller", "gap_seconds":109},
-        ...
-      ]
+      "source": "messageBody",
+      "src": "https://cdn.example.com/a.jpg",
+      "local_path": "",
+      "relative_path": "IMChatlogExport_..._assets/seq0003_a.jpg",
+      "download_status": "downloaded"
     }
-  ]
+  ],
+  "order_card": null
 }
 ```
 
-## 典型分析工作流（AI调用示例）
+会话级输出包含 `inline_image_count` 和 `failed_inline_image_count`，用于快速识别图片覆盖和失败项。
 
-脚本本身不做业务判断。以下是 AI 如何组合基础能力完成各种分析的思路：
+## 分析范式
 
-### 示例A：检测"感谢后仍回复"
+### 关键词上下文
+
 ```bash
-# Step 1: 提取所有包含感谢关键词的客户消息 + 上下文
-python scan_im.py ./logs -k thanks --ctx 3 -o step1.json
-
-# Step 2: AI 在 prompt 中定义判断逻辑，分析 step1.json 中的 context_matches
-# → 判断 context_after 中是否包含 seller 的非结束语业务消息
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  -k refund \
+  --ctx 3 \
+  -o .im_archive/analysis_refund_ctx_20260616.json
 ```
 
-### 示例B：统计退款类咨询占比
-```bash
-# Step 1: 提取含 refund/退款 关键词的消息
-python scan_im.py ./logs -k refund -o refunds.json
+Agent 再读取 `context_matches` 做会话级判断，不要只看命中的单句。
 
-# Step 2: AI 统计 refunds.json 中的 session 分布、角色分布
+### 只看买家消息
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --role buyer \
+  -o .im_archive/analysis_buyer_20260616.json
 ```
 
-### 示例C：客服响应效率分析
-```bash
-# Step 1: 获取全部时间间隔数据
-python scan_im.py ./logs --seq-diff -o gaps.json
+### 订单卡提取
 
-# Step 2: AI 过滤 buyer→seller 方向的 gap，统计分布、找出异常值
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --extract orders \
+  -o .im_archive/analysis_orders_20260616.json
 ```
 
-### 示例D：订单信息汇总
-```bash
-# Step 1: 提取所有订单卡
-python scan_im.py ./logs --extract orders -o orders.json
+订单分析优先读 `rawHtml` 中的订单卡，不要只靠正文猜订单号、产品名或金额。
 
-# Step 2: AI 按产品类型、金额区间分组统计
+### 响应时延
+
+```bash
+python skills/ctrip-im-parser/scripts/scan_im.py \
+  .im_archive/output/20260616 \
+  --seq-diff \
+  -o .im_archive/analysis_gaps_20260616.json
 ```
+
+统计响应效率时只统计 `buyer -> seller` 的相邻消息间隔，不要把 system 消息混入平均值。
+
+## 常见误读
+
+- 把 `*.image-index.json` 当会话 JSON：错误。它只保存图片索引。
+- 扫 `_assets/` 判断“客人发了哪些图”：错误。必须回到 `sessionId + sequence + source`。
+- 把 `thumbSrc` 当正文图片主入口：错误。它只做预览兜底。
+- 把商品卡/订单卡/头像图片算作正文图片：错误。正文图片必须是 `source == "messageBody"`。
+- 只读 Markdown：不推荐。Markdown 可能不存在，且字段信息少于 JSON。
 
 ## 字段参考
 
-详见 `{SKILL_DIR}/references/data_schema.md`
-
-
-## 新目录与命名约定（2026-04）
-
-### 目录层级
-```
-IMChatlogExport/{yyyyMMdd}/{客服名}/IMChatlogExport_{yyyyMMddHHmmss}_{sessionId}_{客服名}.json
-```
-
-### 解析策略（供读取产物时使用）
-1. **优先按标准模式解析**：
-   - 文件名正则：`^IMChatlogExport_(\d{14})_([^_]+)_(.+)\.json$`
-   - 路径末尾两级：`{yyyyMMdd}/{客服名}/`
-2. **若文件名不匹配**：
-   - 回退读取 JSON 字段：`sessionId`、`csName`、`createTime`、`exportedAt`
-   - `createTime` 缺失时再用 `exportedAt` 或文件 mtime 推断
-3. **若发现新模式**：
-   - 记录新模式样例（至少3个）
-   - 提取稳定分隔符与字段位置（前缀、时间戳、sessionId、客服名）
-   - 在脚本中新增并行匹配规则，保留对旧模式兼容
-
-### 示例
-- `IMChatlogExport_20260428113045_100001089130749_门票活动旅游管家Nay.json`
-  - create_time: `2026-04-28 11:30:45`
-  - session_id: `100001089130749`
-  - cs_name: `门票活动旅游管家Nay`
-- `IMChatlogExport_20260427101403_200001090447125_vbk_2560483_门票活动旅游管家Susie.json`
-  - create_time: `2026-04-27 10:14:03`
-  - session_id: `200001090447125`
-  - cs_name: `vbk_2560483_门票活动旅游管家Susie`
-- 路径：`IMChatlogExport/20260427/门票活动旅游管家Sara/IMChatlogExport_20260427180122_600001087328645_门票活动旅游管家Sara.json`
-  - date_dir: `20260427`（可用于快速分区）
+详见 `skills/ctrip-im-parser/references/data_schema.md`。
