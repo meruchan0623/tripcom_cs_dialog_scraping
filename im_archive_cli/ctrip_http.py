@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 
 import requests
 
+from .cdp_plugin_controller import CDPClient
 from .config import AppConfig
 from .models import SessionRecord
 from .media import extract_inline_image_attachment
@@ -445,6 +447,15 @@ def _select_vbooking_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
     raise RuntimeError("未找到已登录的 vbooking.ctrip.com 页面；请先在浏览器打开携程 IMExperience 页面")
 
 
+def _read_json_url(url: str, timeout: float = 5.0) -> Any:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _format_cdp_discovery_error(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {str(exc)[:200]}"
+
+
 class CtripImCdpFetchClient(CtripImHttpClient):
     """Run the same SOA requests through an already logged-in vbooking page."""
 
@@ -466,14 +477,78 @@ class CtripImCdpFetchClient(CtripImHttpClient):
         self.cookie_header = ""
         self.auth_source = "cdp-page-fetch"
         self.proxy_base_url = str(cfg.cdp_proxy_base_url).rstrip("/")
+        self.direct_cdp_base_url = f"http://127.0.0.1:{int(getattr(cfg, 'cdp_port', 9222) or 9222)}"
+        self._cdp_eval_mode = "proxy"
+        self._target_ws_url = ""
         self.target_id = target_id or self._find_vbooking_target()
 
     def _find_vbooking_target(self) -> str:
-        with urllib.request.urlopen(f"{self.proxy_base_url}/targets", timeout=5) as resp:  # noqa: S310
-            raw_targets = json.loads(resp.read().decode("utf-8"))
-        targets = raw_targets if isinstance(raw_targets, list) else []
-        target = _select_vbooking_target(targets)
-        return _target_identifier(target)
+        proxy_error: BaseException | None = None
+        try:
+            raw_targets = _read_json_url(f"{self.proxy_base_url}/targets", timeout=5)
+            targets = raw_targets if isinstance(raw_targets, list) else []
+            target = _select_vbooking_target(targets)
+            self._cdp_eval_mode = "proxy"
+            self._target_ws_url = str(target.get("webSocketDebuggerUrl") or "")
+            return _target_identifier(target)
+        except (HTTPError, URLError, TimeoutError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+            proxy_error = exc
+
+        try:
+            raw_targets = _read_json_url(f"{self.direct_cdp_base_url}/json/list", timeout=5)
+            targets = raw_targets if isinstance(raw_targets, list) else []
+            target = _select_vbooking_target(targets)
+            target_id = _target_identifier(target)
+            ws_url = str(target.get("webSocketDebuggerUrl") or "")
+            if not ws_url:
+                raise RuntimeError(f"DevTools target 未返回 webSocketDebuggerUrl: {target_id}")
+            self._cdp_eval_mode = "direct"
+            self._target_ws_url = ws_url
+            self.log(
+                "cdp_proxy_base_url 不可用，已 fallback 到 "
+                f"127.0.0.1:{int(getattr(self.cfg, 'cdp_port', 9222) or 9222)} DevTools endpoint"
+            )
+            return target_id
+        except (HTTPError, URLError, TimeoutError, OSError, RuntimeError, json.JSONDecodeError) as direct_exc:
+            proxy_text = _format_cdp_discovery_error(proxy_error) if proxy_error else "unknown"
+            direct_text = _format_cdp_discovery_error(direct_exc)
+            port = int(getattr(self.cfg, "cdp_port", 9222) or 9222)
+            raise RuntimeError(
+                "cdp_proxy_base_url 不可用"
+                f"（{self.proxy_base_url}/targets: {proxy_text}），且 "
+                f"127.0.0.1:{port} DevTools endpoint 不可用或未找到 vbooking 页面"
+                f"（{direct_text}）；请启动 CDP proxy，或确认 Edge/Chrome 已用 "
+                f"--remote-debugging-port={port} 打开 IMExperience 页面"
+            ) from direct_exc
+
+    def _eval_script(self, script: str, timeout: int) -> dict[str, Any]:
+        if self._cdp_eval_mode == "direct":
+            if not self._target_ws_url:
+                raise RuntimeError("DevTools target 未返回 webSocketDebuggerUrl，无法执行页面上下文请求")
+            page = CDPClient(self._target_ws_url)
+            try:
+                page.call("Runtime.enable")
+                result = page.call(
+                    "Runtime.evaluate",
+                    {
+                        "expression": script,
+                        "awaitPromise": True,
+                        "returnByValue": True,
+                    },
+                )
+                if result.get("exceptionDetails"):
+                    raise RuntimeError(f"CDP Runtime.evaluate 异常: {result['exceptionDetails']}")
+                return {"value": result.get("result", {}).get("value")}
+            finally:
+                page.close()
+
+        request = urllib.request.Request(
+            f"{self.proxy_base_url}/eval?target={urllib.parse.quote(self.target_id)}",
+            data=script.encode("utf-8"),
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout + 5) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8"))
 
     def post_json(self, url: str, body: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
         elapsed = time.monotonic() - self.last_request_at
@@ -499,14 +574,8 @@ class CtripImCdpFetchClient(CtripImHttpClient):
   return {{status: resp.status, ok: resp.ok, text, data}};
 }})()
 """
-        request = urllib.request.Request(
-            f"{self.proxy_base_url}/eval?target={urllib.parse.quote(self.target_id)}",
-            data=script.encode("utf-8"),
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=timeout + 5) as resp:  # noqa: S310
-                envelope = json.loads(resp.read().decode("utf-8"))
+            envelope = self._eval_script(script, timeout)
         finally:
             self.last_request_at = time.monotonic()
         result = envelope.get("value") if isinstance(envelope, dict) else None

@@ -15,6 +15,7 @@ from im_archive_cli.ctrip_http import (
     CtripImHttpClient,
     CtripRequestBudget,
     CtripRequestBudgetExceeded,
+    EMPLOYEE_URL,
     build_employee_body,
     build_detail_body,
     build_imvendor_headers,
@@ -215,6 +216,104 @@ def test_cdp_fetch_client_accepts_chrome_devtools_id_schema_from_targets(monkeyp
     client = CtripImCdpFetchClient(AppConfig(), request_interval_sec=0)
 
     assert client.target_id == "devtools-page-1"
+
+
+def test_cdp_fetch_client_falls_back_to_devtools_json_list_when_proxy_targets_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_urls: list[str] = []
+
+    def fake_urlopen(url, timeout=5):
+        text = url_text(url)
+        seen_urls.append(text)
+        if text == "http://localhost:3456/targets":
+            raise TimeoutError("timed out")
+        if text == "http://127.0.0.1:9222/json/list":
+            return FakeUrlopenResponse(
+                [
+                    {
+                        "id": "page-1",
+                        "webSocketDebuggerUrl": "ws://page-1",
+                        "url": "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience",
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected url: {text}")
+
+    logs: list[str] = []
+    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+
+    client = CtripImCdpFetchClient(AppConfig(cdp_port=9222), log=logs.append, request_interval_sec=0)
+
+    assert client.target_id == "page-1"
+    assert seen_urls == ["http://localhost:3456/targets", "http://127.0.0.1:9222/json/list"]
+    assert any("cdp_proxy_base_url 不可用，已 fallback 到 127.0.0.1:9222 DevTools endpoint" in line for line in logs)
+
+
+def test_cdp_fetch_client_uses_direct_devtools_runtime_evaluate_after_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(url, timeout=5):
+        text = url_text(url)
+        if text == "http://localhost:3456/targets":
+            raise TimeoutError("timed out")
+        if text == "http://127.0.0.1:9222/json/list":
+            return FakeUrlopenResponse(
+                [
+                    {
+                        "id": "page-1",
+                        "webSocketDebuggerUrl": "ws://page-1",
+                        "url": "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience",
+                    }
+                ]
+            )
+        raise AssertionError(f"direct fallback should not call proxy eval url: {text}")
+
+    class FakeCDPClient:
+        ws_urls: list[str] = []
+        calls: list[tuple[str, dict]] = []
+        closed = False
+
+        def __init__(self, ws_url: str) -> None:
+            self.ws_url = ws_url
+            FakeCDPClient.ws_urls.append(ws_url)
+
+        def call(self, method: str, params: dict | None = None) -> dict:
+            payload = params or {}
+            FakeCDPClient.calls.append((method, payload))
+            if method == "Runtime.enable":
+                return {}
+            if method == "Runtime.evaluate":
+                return {
+                    "result": {
+                        "value": {
+                            "status": 200,
+                            "ok": True,
+                            "text": '{"ResponseStatus":{"Ack":"Success"},"ok":true}',
+                            "data": {"ResponseStatus": {"Ack": "Success"}, "ok": True},
+                        }
+                    }
+                }
+            raise AssertionError(f"unexpected CDP method: {method}")
+
+        def close(self) -> None:
+            FakeCDPClient.closed = True
+
+    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(ctrip_http, "CDPClient", FakeCDPClient)
+
+    client = CtripImCdpFetchClient(AppConfig(cdp_port=9222), request_interval_sec=0)
+    data = client.post_json(EMPLOYEE_URL, {"probe": True})
+
+    assert data == {"ResponseStatus": {"Ack": "Success"}, "ok": True}
+    assert FakeCDPClient.ws_urls == ["ws://page-1"]
+    assert FakeCDPClient.closed is True
+    assert FakeCDPClient.calls[0] == ("Runtime.enable", {})
+    assert FakeCDPClient.calls[1][0] == "Runtime.evaluate"
+    evaluate_params = FakeCDPClient.calls[1][1]
+    assert evaluate_params["awaitPromise"] is True
+    assert evaluate_params["returnByValue"] is True
+    assert "fetch(" in evaluate_params["expression"]
 
 
 def test_request_budget_stops_before_extra_http_request(tmp_path) -> None:
