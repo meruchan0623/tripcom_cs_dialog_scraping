@@ -54,6 +54,20 @@ curl -s http://localhost:3456/targets
 curl -s http://localhost:3456/targets | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience'
 ```
 
+如果 `curl http://localhost:3456/targets` 超时，但 Edge/Chrome DevTools 端口正常：
+
+```bash
+curl -s http://127.0.0.1:9222/json/list | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience|webSocketDebuggerUrl'
+```
+
+`run collect --via cdp` 会自动 fallback 到 `127.0.0.1:<cdp_port>` DevTools endpoint。日志中应出现：
+
+```text
+cdp_proxy_base_url 不可用，已 fallback 到 127.0.0.1:9222 DevTools endpoint
+```
+
+如果 direct DevTools 也不可用，先重新启动带 `--remote-debugging-port` 的 Edge/Chrome，或修正 `config.yaml` 的 `cdp_port`。
+
 如果没有页面，打开入口页并完成登录：
 
 ```bash

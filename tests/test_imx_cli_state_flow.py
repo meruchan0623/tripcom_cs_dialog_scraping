@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from im_archive_cli.config import AppConfig
+import im_archive_cli.ctrip_http as ctrip_http
 import im_archive_cli.imx_cli as imx_cli
 from im_archive_cli.imx_cli import cmd_import_links, cmd_roles_list, cmd_roles_select, cmd_run_collect_http, cmd_run_export, cmd_state_watch
 from im_archive_cli.models import SessionRecord
@@ -252,6 +253,47 @@ def test_collect_cli_overrides_request_interval(tmp_path, monkeypatch) -> None:
 
     assert rc == 0
     assert captured == {"interval": 2.5}
+
+
+def test_main_collect_cdp_reports_proxy_and_devtools_discovery_failure_without_traceback(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from im_archive_cli.config import save_config
+    from im_archive_cli.imx_cli import main
+
+    cfg = make_cfg(tmp_path)
+    cfg.cdp_proxy_base_url = "http://localhost:3456"
+    cfg.cdp_port = 9222
+    cfg_path = tmp_path / "config.yaml"
+    save_config(cfg_path, cfg)
+
+    def fake_urlopen(url, timeout=5):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+
+    rc = main(
+        [
+            "--config",
+            str(cfg_path),
+            "run",
+            "collect",
+            "--via",
+            "cdp",
+            "--start-date",
+            "2026-06-23",
+            "--end-date",
+            "2026-06-29",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "cdp_proxy_base_url 不可用" in captured.err
+    assert "127.0.0.1:9222 DevTools endpoint" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_main_auth_status_reports_sources_without_cookie_values(tmp_path, capsys) -> None:

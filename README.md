@@ -682,6 +682,7 @@ Agent 初始化机器时可以直接使用仓库根目录的 `config.yaml`。如
 - `extension_dir`：扩展源码目录，默认 `.`，必须包含 `manifest.json`。
 - `cdp_poll_interval_sec`：CDP 状态轮询间隔，默认 `1.0`。
 - `cdp_proxy_base_url`：web-access CDP proxy 地址，默认 `http://localhost:3456`。
+  当该 proxy 的 `/targets` 超时但 `cdp_port` 指向的 Edge/Chrome DevTools 正常时，`run collect --via cdp` 会自动读取 `http://127.0.0.1:<cdp_port>/json/list`，接受 DevTools 原生 `id` 字段，并通过目标页的 `webSocketDebuggerUrl` 执行 `Runtime.evaluate`。SingleFile 归档仍需要 `cdp_proxy_base_url` 提供 `/new`、`/eval`、`/close`。
 
 登录态与纯 HTTP 请求：
 - `ctrip_cookie_header_file`：优先读取的 Cookie header 文本文件。

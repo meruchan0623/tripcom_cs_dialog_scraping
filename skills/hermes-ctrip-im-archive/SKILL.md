@@ -538,14 +538,23 @@ python skills/ctrip-im-parser/scripts/scan_im.py \
 
 ### CDP proxy 不可用
 
-症状：`curl http://localhost:3456/targets` 失败。
+症状：`curl http://localhost:3456/targets` 失败或超时。
 
 处理：
 
 ```bash
 node /Users/tashima_meru/.cc-switch/skills/web-access/scripts/check-deps.mjs
 curl -s http://localhost:3456/targets
+curl -s http://127.0.0.1:9222/json/list | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience|webSocketDebuggerUrl'
 ```
+
+如果 `cdp_proxy_base_url` 不可用但 `cdp_port` DevTools endpoint 可用，`run collect --via cdp` 会自动 fallback 到 `127.0.0.1:<cdp_port>`，并输出：
+
+```text
+cdp_proxy_base_url 不可用，已 fallback 到 127.0.0.1:9222 DevTools endpoint
+```
+
+SingleFile 归档仍需要兼容 `/new`、`/eval`、`/close` 的 proxy；direct DevTools fallback 只覆盖 `collect --via cdp` 的页面上下文 fetch。
 
 ### 没有 vbooking 页面
 
