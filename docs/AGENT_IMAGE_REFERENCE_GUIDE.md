@@ -8,6 +8,7 @@
 
 ```text
 IMChatlogExport_20260629_120000_12345.json
+IMChatlogExport_20260629_120000_12345.image-index.json
 IMChatlogExport_20260629_120000_12345.md
 IMChatlogExport_20260629_120000_assets/
 IMChatlogExport_20260629_120000.html
@@ -15,6 +16,38 @@ IMChatlogExport_20260629_120000_images/
 ```
 
 JSON/Markdown 中的引用与落盘均优先指向该会话级 assets 目录。
+
+## Agent 首选入口
+
+后续 Agent 回读正文图片时，首选读取与会话 JSON 同级的 `*.image-index.json`，而不是直接扫描 `_assets/` 目录或优先解析 Markdown。
+
+索引文件结构：
+
+```json
+{
+  "sessionId": "s1",
+  "jsonPath": "/absolute/path/to/IMChatlogExport_20260616090000_s1_Alice.json",
+  "images": [
+    {
+      "sessionId": "s1",
+      "sequence": 1,
+      "messageType": "image",
+      "source": "messageBody",
+      "downloadStatus": "downloaded",
+      "src": "https://cdn.example.com/a.jpg",
+      "localPath": "/absolute/path/to/IMChatlogExport_20260616090000_s1_Alice_assets/seq0001_abc123.jpg",
+      "relativePath": "IMChatlogExport_20260616090000_s1_Alice_assets/seq0001_abc123.jpg",
+      "resolvedPath": "/absolute/path/to/IMChatlogExport_20260616090000_s1_Alice_assets/seq0001_abc123.jpg"
+    }
+  ]
+}
+```
+
+读取顺序：
+
+1. `*.image-index.json`
+2. 原始会话 `*.json`
+3. `*.md` 中的 `![图片](...)` 仅作展示面兜底
 
 ## JSON 正文图片读取规则
 

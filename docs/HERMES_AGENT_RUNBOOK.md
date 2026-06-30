@@ -256,7 +256,7 @@ POST https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession
 结构化 JSON/Markdown 导出只允许使用 HTTP 详情接口：
 
 ```bash
-imx run export --kind structured --via http --formats json,markdown
+imx run export --kind structured --via http
 ```
 
 如果 HTTP 详情导出返回 `401/403` 或 `messages` 为空，不要回退到 CDP/Selenium DOM 聊天记录抓取。应先执行 `discover detail-xhr` 复核 `getMessagesBySession` 请求体、请求头和登录态，再修正配置。
@@ -318,8 +318,7 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select 
 
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
   --kind structured \
-  --formats json,markdown \
-  --via cdp
+  --via http
 ```
 
 ### 5.2 自定义日期区间
@@ -354,8 +353,7 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select 
 
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
   --kind structured \
-  --formats json,markdown \
-  --via cdp
+  --via http
 ```
 
 ### 5.4 只导出链接表

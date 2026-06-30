@@ -7,8 +7,11 @@ vbooking_url: https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality
 detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=
 page_size: 1000
 max_pages: 50
-concurrency: 4
-window_sec: 2
+concurrency: 2
+window_sec: 4
+ctrip_request_interval_sec: 1.0
+structured_request_interval_sec: 0.5
+ctrip_request_budget_max: 30
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
@@ -20,3 +23,9 @@ extension_dir: .
 extension_runtime_dir: .im_archive/runtime_extensions
 chrome_state_file: .im_archive/chrome_state.json
 cdp_poll_interval_sec: 1.0
+browser_delay_between_pages_ms: 500
+download_images: true
+image_max_workers: 2
+image_request_interval_sec: 1.0
+image_timeout_sec: 30
+image_max_bytes: 20971520

@@ -52,6 +52,152 @@ tripcom_cs_dialog_scraping/
 - 文件命名：`IMChatlogExport_{会话创建时间yyyyMMddHHmmss}_{sessionId}_{客服名}.{html|json|md}`
 - 目录层级：`Ctrip-CS-dialog/{yyyyMMdd}/{客服名}/导出文件`（创建时间优先取会话列表里的创建时间）
 
+## Agent 驱动机器运行手册
+
+本节是给 Agent / Hermes / openclaw 这类无人值守机器读取的执行合同。优先按本节执行；下方 CLI 参数总览用于查具体参数。
+
+### 运行前提
+
+- 工作目录：进入仓库根目录 `/Users/tashima_meru/Develop/tripcom_cs_dialog_scraping` 后再执行命令。
+- Python：`pyproject.toml` 要求 `Python >= 3.10`。
+- 浏览器：`config.yaml` 当前指向 `/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`；如果目标机器不同，先改 `chrome_path` 或留空让程序自动探测。
+- 扩展目录：`extension_dir: .` 表示加载当前仓库根目录的 Manifest V3 扩展；目标目录必须包含 `manifest.json`。
+- 登录态：首次运行必须人工登录一次；后续复用 `.im_archive/profile` 和 `ctrip-cli-sessions` 文件。
+- 密钥与 Cookie：不要把真实 Cookie、账号密码、验证码、Authorization 写进 README、日志、提交或工件；只允许使用本地私有文件或环境外部注入。
+
+### 首次初始化
+
+```bash
+cd /Users/tashima_meru/Develop/tripcom_cs_dialog_scraping
+bash scripts/openclaw_setup.sh
+source .venv/bin/activate
+imx --help
+```
+
+`openclaw_setup.sh` 会创建 `.venv`、安装当前包、给仓库内 `imx` 加执行权限，并把 `~/.local/bin/imx` 软链到仓库脚本。
+
+### 首次登录
+
+```bash
+cd /Users/tashima_meru/Develop/tripcom_cs_dialog_scraping
+source .venv/bin/activate
+imx chrome start --headed
+imx auth login
+imx auth status
+```
+
+执行 `imx auth login` 后，在打开的浏览器里完成 Trip.com 后台登录。`imx auth status` 只输出脱敏状态，不会打印 Cookie 值。
+
+登录态读取顺序：
+
+1. `ctrip_cookie_header_file`，默认 `/Users/tashima_meru/Library/CloudStorage/OneDrive-个人/文档/ctrip-cli-sessions/ctrip_cookie_header.txt`
+2. `ctrip_auth_json`，默认 `/Users/tashima_meru/Library/CloudStorage/OneDrive-个人/文档/ctrip-cli-sessions/ctrip_auth_plain.json` 的 `cookieHeader` 字段
+
+如果两者都不可用，纯 HTTP 采集/导出会报 `未找到可用携程 Cookie`。
+
+### 日常结构化导出
+
+默认产出仅 JSON；Markdown 只有显式传 `--formats json,markdown` 才会导出。
+
+```bash
+cd /Users/tashima_meru/Develop/tripcom_cs_dialog_scraping
+source .venv/bin/activate
+
+imx chrome start --headed
+imx auth status
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --via cdp --page-size 1000 --max-pages 50
+imx roles select --all
+imx run export --kind structured --via http
+imx state watch --once
+```
+
+只导出指定客服：
+
+```bash
+imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --include "客服名或账号" --via cdp --page-size 1000 --max-pages 50
+imx roles select --include "客服名或账号"
+imx run export --kind structured --via http
+```
+
+### 请求预算运行
+
+真实携程接口探测或 HTTP 详情导出建议使用请求账本，避免跨命令超额：
+
+```bash
+LEDGER=.im_archive/ctrip-request-ledger.json
+imx request-budget status --request-budget 30 --request-ledger "$LEDGER"
+imx preflight --request-budget 30 --request-ledger "$LEDGER" --via proxy
+imx run export --kind structured --via http --request-budget 30 --request-ledger "$LEDGER"
+```
+
+注意事项：
+
+- `request-budget` 最大值是 `30`。
+- `request-ledger` 必须和 `request-budget` 一起使用。
+- 账本剩余额度小于待导出会话数时，结构化导出会在发出任何详情请求前停止。
+- `singlefile` 和 `links` 不支持请求预算参数。
+
+### 详情接口初始化
+
+纯 HTTP 结构化导出依赖真实消息详情接口。若 `ctrip_im_detail_messages_url` 为空、未经过浏览器发现证明，或导出返回 `401/403/messages 为空`，按以下顺序处理：
+
+```bash
+imx chrome start --headed --debug
+imx discover cdp-status
+imx discover detail-xhr \
+  --session-id 100001127051842 \
+  --request-budget 30 \
+  --request-ledger .im_archive/ctrip-request-ledger.json \
+  --output .im_archive/detail_xhr_probe.json
+imx discover apply-config --report .im_archive/detail_xhr_probe.json
+```
+
+禁止把 `/15529/queryIMSessionInfo` 当作消息详情接口；它不是结构化聊天消息列表。正确消息详情接口必须来自登录后详情页真实 XHR，并通过 `discover apply-config` 写入 `ctrip_im_detail_verified_source: browser_detail_xhr`。
+
+### 输出与回读合同
+
+当前 `config.yaml` 的输出根目录是 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`。结构化导出目录形态：
+
+```text
+<output_dir>/<yyyyMMdd>/<客服名>/
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.image-index.json
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>.md          # 仅显式导出 Markdown 时存在
+  IMChatlogExport_<yyyyMMddHHmmss>_<sessionId>_<客服名>_assets/
+```
+
+Agent 回读优先级：
+
+1. 读取 `*.image-index.json` 定位正文图片。
+2. 读取同名会话 `*.json` 获取完整消息、客服、会话和附件字段。
+3. 仅在展示或兜底时读取 `.md`。
+
+不要直接扫描 `_assets/` 目录作为主入口；这样会丢失 `sessionId`、`sequence`、`downloadStatus` 和正文图片来源。
+
+### 本地自测
+
+初始化或改动后先跑本地 mock 自测，不会访问携程接口：
+
+```bash
+imx self-test http-export --request-budget 1
+python3 -m pytest tests/test_image_index.py tests/test_http_export.py tests/test_media.py -q
+```
+
+`self-test http-export` 输出的 `outputs.json` 是会话 JSON，`outputs.imageIndex` 是图片索引 JSON，两者不要混用。
+
+### 失败恢复
+
+- 导出失败记录在 `failures_file`，默认 `.im_archive/failures.jsonl`。
+- `401/403` 通常是登录态或请求头问题，先执行 `imx auth status`、重新登录或重新抓详情 XHR。
+- `429/500/502/503/504` 和网络超时通常可用 `retry-failures` 重跑。
+- 连续 3 个可重试失败或连续 3 个不可重试失败时，结构化导出会提前停止，避免扩大错误批次。
+
+```bash
+imx run retry-failures --kind structured --retryable-only
+imx run retry-failures --kind structured --session-id 100001127051842
+imx run retry-failures --kind structured --retryable-only --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
+```
+
 ## 已知限制
 
 - 当前为简化归档方案，外链资源不保证完全离线可用
@@ -166,7 +312,10 @@ imx roles select --all
 # 5b) 或只选择某位/多位客服
 imx roles select --include "张三,李四"
 
-# 6) 导出结构化对话（默认 JSON，可用 --formats 选择 Markdown）
+# 6) 导出结构化对话（默认仅 JSON）
+imx run export --kind structured
+
+# 如需同时导出 Markdown，显式指定 formats
 imx run export --kind structured --formats json,markdown
 ```
 
@@ -213,6 +362,21 @@ bash scripts/openclaw_structured_export.sh --roles "张三,李四"
 - 相关实现边界与失败处理请按
   [AGENT 图片参考手册](./docs/AGENT_IMAGE_REFERENCE_GUIDE.md)
   执行（包括头像/卡片图忽略规则和 `downloadStatus=failed` 处理）
+
+### 正文图片索引 sidecar
+
+每次 `imx run export --kind structured` 在写出会话 JSON 时，还会额外写出同级索引文件：
+
+```text
+IMChatlogExport_20260616090000_s1_Alice.json
+IMChatlogExport_20260616090000_s1_Alice.image-index.json
+IMChatlogExport_20260616090000_s1_Alice_assets/
+```
+
+用途：
+- 给后续 Agent/脚本提供稳定图片入口
+- 避免直接扫描 `_assets/` 目录时丢失 `sessionId`、`sequence`、`downloadStatus`
+- 避免把 Markdown 当成权威数据源
 
 ### CLI 参数总览（详细）
 
@@ -262,6 +426,8 @@ imx auth status
   - `cdp`：默认；在当前已登录携程页面上下文执行真实前端 `fetch`
   - `http`：纯 Python requests，读取 `ctrip-cli-sessions` 中的 Cookie header；部分接口可能被 403 拦截
   - `browser`：旧扩展点击采集路径，作为兼容兜底；该路径无法精确接入请求账本，使用请求预算时请选 `cdp` 或 `http`
+- `--concurrency <int>`：覆盖本次运行请求线程数/并发数；不传则使用 `config.yaml` 的 `concurrency`
+- `--request-interval-sec <float>`：覆盖本次采集单 client 请求间隔秒数；不传则使用 `config.yaml` 的 `ctrip_request_interval_sec`
 - `--request-budget <int>`：本次最多允许发出的携程接口请求数，最大 `30`；达到上限前会停止，不会发出下一次请求
 - `--request-ledger <path>`：跨多条命令累计请求数的 JSON 账本；必须配合 `--request-budget 30` 使用，可控制整轮总请求数
 
@@ -270,6 +436,7 @@ imx auth status
 imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --page-size 1000
 imx run collect --start-date 2026-06-16 --end-date 2026-06-16 --include "vbk_2538177" --page-size 10 --max-pages 1
 imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16
+imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16 --request-interval-sec 2
 imx run collect --via http --start-date 2026-06-16 --end-date 2026-06-16 --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
 imx run collect --via browser --page-size 1000
 ```
@@ -294,9 +461,11 @@ imx roles select --include "张三,李四"
   - `singlefile`：归档 HTML
   - `structured`：结构化导出（JSON/Markdown）
   - `links`：导出链接表 xlsx
-- `--formats json,markdown`：仅 `structured` 生效，默认 `json`
+- `--formats json,markdown`：仅 `structured` 生效；不传时默认仅导出 `json`
 - `--output <path>`：仅 `links` 生效，指定 xlsx 输出路径
 - `--via http`：仅 `structured` 生效；结构化 JSON/Markdown 导出只支持纯 Python requests 详情消息
+- `--concurrency <int>`：覆盖本次结构化导出请求线程数/并发数；不传则使用 `config.yaml` 的 `concurrency`
+- `--request-interval-sec <float>`：覆盖本次结构化导出 worker 内请求间隔秒数；不传则使用 `config.yaml` 的 `structured_request_interval_sec`
 - `--request-budget <int>`：本次 HTTP 详情导出最多允许发出的携程接口请求数，最大 `30`
 - `--request-ledger <path>`：跨多条命令累计请求数的 JSON 账本；必须配合 `--request-budget 30` 使用，建议与发现/采集命令共用同一路径
 
@@ -310,9 +479,29 @@ HTTP 详情导出在发出第一条请求前还会检查账本剩余额度是否
 imx run export --kind structured
 imx run export --kind structured --formats json,markdown
 imx run export --kind structured --via http --formats json,markdown
+imx run export --kind structured --via http --concurrency 2 --request-interval-sec 1.5
 imx run export --kind structured --via http --formats json,markdown --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
 imx run export --kind singlefile
 imx run export --kind links --output /data/IM_Archive_links.xlsx
+```
+
+#### `imx run retry-failures`
+- `--kind structured`：重跑结构化 HTTP 导出失败项
+- `--formats json,markdown`：可选；不传时默认仅重跑 JSON
+- `--retryable-only`：只重跑失败账本中 `retryable=true` 的会话
+- `--session-id <id>`：只重跑指定会话
+- `--concurrency <int>`：覆盖本次重跑请求线程数/并发数
+- `--request-interval-sec <float>`：覆盖本次重跑 worker 内请求间隔秒数
+- `--request-budget <int>` / `--request-ledger <path>`：与 `run export --kind structured --via http` 一致
+
+`failures.jsonl` 会记录 `stage`、`error_type`、`retryable`、`attempt`、`created_at` 等字段。HTTP 详情请求对 `429/500/502/503/504` 和网络超时会做有限重试；`401/403` 会快速失败，通常需要先刷新登录态或重新抓包。
+
+示例：
+```bash
+imx run retry-failures --kind structured --retryable-only
+imx run retry-failures --kind structured --session-id 100001127051842 --formats json,markdown
+imx run retry-failures --kind structured --retryable-only --concurrency 1 --request-interval-sec 2
+imx run retry-failures --kind structured --retryable-only --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
 ```
 
 #### `imx request-budget status`
@@ -437,7 +626,7 @@ imx discover detail-xhr --session-id 100001127051842 --request-budget 10 --cdp-b
 示例：
 ```bash
 imx discover apply-config --report .im_archive/detail_xhr_probe.json
-imx run export --kind structured --via http --formats json,markdown --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
+imx run export --kind structured --via http --request-budget 30 --request-ledger .im_archive/ctrip-request-ledger.json
 ```
 
 ### 其他典型执行剧本
@@ -472,18 +661,83 @@ imx run export --kind links
 
 ### 配置（`config.yaml`）
 
-关键项：
-- `profile_dir`：Chrome 持久登录目录
-- `cdp_port`：CDP 端口（默认 `9222`）
-- `chrome_path`：Chrome 可执行文件（为空自动探测）
-- `extension_dir`：扩展源码目录（应包含 `manifest.json`）
-- `chrome_state_file`：运行中 Chrome 元信息文件
-- `ctrip_cookie_header_file` / `ctrip_auth_json`：纯 HTTP 模式读取的携程 Cookie 来源
-- `ctrip_im_detail_messages_url`：纯 HTTP 详情消息候选接口
-- `ctrip_im_detail_extra_body`：纯 HTTP 详情接口额外请求体字段
-- `cdp_proxy_base_url`：页面上下文请求模式使用的 web-access CDP proxy，默认 `http://localhost:3456`
-- `output_prefix`：导出文件前缀
-- `output_dir`：默认 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`
-- `page_size`：默认单页容量（当前默认 `1000`，来自 2026-06-22 至 2026-06-28 会话列表探测最大稳定值）
-- `concurrency`：HTTP 结构化导出默认最大并发请求数（当前默认 `4`）
-- `window_sec`：HTTP 结构化导出时间窗口秒数（当前默认 `2`，即每批最多 4 个请求，批次间隔约 0.5 秒）
+Agent 初始化机器时可以直接使用仓库根目录的 `config.yaml`。如果文件不存在，程序会按 `im_archive_cli/config.py` 的默认值生成。
+
+路径与状态：
+- `profile_dir`：Chrome 持久登录目录，默认 `.im_archive/profile`。
+- `state_file`：Python 会话池与角色选择状态，默认 `.im_archive/state.json`。
+- `output_dir`：导出根目录，当前仓库配置为 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`，代码默认值为 `.im_archive/output`。
+- `log_dir`：运行日志目录，默认 `.im_archive/logs`。
+- `failures_file`：失败账本，默认 `.im_archive/failures.jsonl`。
+- `chrome_state_file`：运行中 Chrome 进程/端口信息，默认 `.im_archive/chrome_state.json`。
+- `extension_runtime_dir`：运行时扩展目录，默认 `.im_archive/runtime_extensions`。
+
+浏览器与扩展：
+- `vbooking_url`：采集入口页，默认 `https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience`。
+- `detail_base_url`：详情页 URL 前缀，默认 `https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=`。
+- `cdp_port`：原生 CDP 端口，默认 `9222`。
+- `chrome_path`：浏览器可执行文件；为空时自动探测。当前仓库配置为 Microsoft Edge。
+- `extension_id`：扩展 ID；通常留空，由程序探测。
+- `load_unpacked_extension`：是否加载未打包扩展，默认 `true`。
+- `extension_dir`：扩展源码目录，默认 `.`，必须包含 `manifest.json`。
+- `cdp_poll_interval_sec`：CDP 状态轮询间隔，默认 `1.0`。
+- `cdp_proxy_base_url`：web-access CDP proxy 地址，默认 `http://localhost:3456`。
+
+登录态与纯 HTTP 请求：
+- `ctrip_cookie_header_file`：优先读取的 Cookie header 文本文件。
+- `ctrip_auth_json`：备用登录态 JSON 文件，读取其中 `cookieHeader` 字段。
+- `ctrip_im_butype`：列表接口业务类型，默认 `品类活动`。
+- `ctrip_im_consultation_scene`：咨询场景筛选，默认 `aggregate`。
+- `ctrip_im_product_channel`：产品渠道筛选，默认 `aggregate`。
+- `ctrip_im_currency_type`：币种，默认 `CNY`。
+- `ctrip_im_detail_messages_url`：纯 HTTP 详情消息接口 URL；必须由 `discover detail-xhr` 验证后写入。
+- `ctrip_im_detail_extra_body`：详情接口额外请求体字段；动态字段如 `sessionId`、`pageNo` 由程序生成。
+- `ctrip_im_detail_page_size`：详情消息分页大小，默认 `100`。
+- `ctrip_im_detail_verified_source`：详情接口验证来源；对携程域名详情接口应为 `browser_detail_xhr`。
+- `ctrip_im_detail_verified_url`：验证时的详情页 URL。
+- `ctrip_im_detail_verified_at`：验证时间。
+
+采集与导出速度：
+- `page_size`：会话列表分页大小，当前默认 `1000`。
+- `max_pages`：每位客服最多读取页数，默认 `50`。
+- `concurrency`：HTTP 结构化导出并发数，默认 `4`；当前 `config.yaml` 建议值为 `2`。
+- `window_sec`：HTTP 结构化导出批次时间窗口，默认 `2`；当前 `config.yaml` 建议值为 `4`，即每批最多 2 个请求，批次间隔约 2 秒。
+- `ctrip_request_interval_sec`：列表采集、详情发现等单 client 请求最小间隔，默认 `0.5`；当前建议值为 `1.0`。
+- `structured_request_interval_sec`：结构化导出 worker 内连续详情请求最小间隔，默认 `0.0`；当前建议值为 `0.5`。
+- `ctrip_request_budget_max`：携程接口请求预算允许的最大值，默认 `30`；可调低以强制更保守的运行。
+- `output_prefix`：链接表导出前缀，默认 `IM_Archive`。
+- `headless`：浏览器默认是否无头，默认 `true`。
+- `timezone`：时间区域，默认 `Asia/Shanghai`。
+- `browser_delay_between_pages_ms`：旧浏览器扩展采集路径翻页后等待毫秒数，默认 `120`；当前建议值为 `500`。
+
+图片下载：
+- `download_images`：结构化导出时是否下载正文图片，默认 `true`。
+- `image_max_workers`：图片下载并发数，默认 `4`；当前建议值为 `2`。
+- `image_request_interval_sec`：图片下载批次间隔，默认 `0.5`；当前建议值为 `1.0`。
+- `image_timeout_sec`：单张图片下载超时秒数，默认 `30`。
+- `image_max_bytes`：单张图片最大字节数，默认 `20971520`。
+
+最小可运行配置示例：
+
+```yaml
+profile_dir: .im_archive/profile
+state_file: .im_archive/state.json
+output_dir: /Users/tsimclaw/Downloads/Ctrip-CS-dialog
+log_dir: .im_archive/logs
+failures_file: .im_archive/failures.jsonl
+chrome_path: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+extension_dir: .
+cdp_port: 9222
+page_size: 1000
+max_pages: 50
+concurrency: 2
+window_sec: 4
+ctrip_request_interval_sec: 1.0
+structured_request_interval_sec: 0.5
+ctrip_request_budget_max: 30
+download_images: true
+image_max_workers: 2
+image_request_interval_sec: 1.0
+image_timeout_sec: 30
+image_max_bytes: 20971520
+```
