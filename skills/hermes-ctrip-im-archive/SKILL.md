@@ -26,16 +26,18 @@ description: |
    复用已登录的 `vbooking.ctrip.com` 页面，在页面上下文里发真实前端 `fetch`，抓客服列表和会话列表。
 2. `roles select`：
    基于 `.im_archive/state.json` 选择全部或部分客服。
-3. `run export --kind structured --via cdp`：
-   通过 `cdp_proxy_base_url` 打开每条详情页，注入 `detail-page.js`，提取完整消息数组，落盘 `json` / `md`。
-4. 后处理：
+3. `run export --kind links`：
+   读取 Python state 并导出链接表 xlsx，便于人工抽检和后续二次处理。
+4. `run export --kind structured --formats json,markdown`：
+   通过已验证的详情消息接口走纯 HTTP 请求，落盘 `json` / `md`。不传 `--via` 时默认等同 `--via http`。
+5. 后处理：
    用导出的 `IMChatlogExport_*.json`、`links xlsx`、会话索引 `csv/xlsx` 做筛选、统计、质检分析。
 
 注意：
 
-- 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`。
-- 纯 `requests` 的 `export --via http` 只有在详情接口 URL 已经通过 `discover detail-xhr` 验证并写回配置后才应尝试。
-- 因此 Hermes 默认正式链路应使用 `cdp`，不要把 `http` 当作主路径。
+- 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`，所以会话列表采集优先使用 `collect --via cdp`。
+- `structured` 导出只支持 `--via http`。使用前应先通过 `discover detail-xhr` 验证并写回 `ctrip_im_detail_messages_url`。
+- `--via cdp` 仍用于采集列表、请求发现、预检和 SingleFile 页面归档；不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
 
 ## 历史咨询筛选请求
 
@@ -302,16 +304,17 @@ python3 -m im_archive_cli.imx_cli run export --kind singlefile
 Hermes 正式任务推荐：
 
 ```bash
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --kind links
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
   --kind structured \
-  --formats json,markdown \
-  --via cdp
+  --formats json,markdown
 ```
 
 说明：
 
-- `structured --via cdp`：当前最稳妥，适合正式产出。
-- `structured --via http`：只在你已经完成 `detail-xhr` 发现并写入 `ctrip_im_detail_messages_url` 后使用。
+- `structured`：只支持 `--via http`；不传 `--via` 时默认就是 HTTP。
+- CLI 对 `--via cdp` 的明确错误是：`structured export 已剥离 CDP/Selenium DOM 抓取路径，只支持 --via http`。
+- `links`：先导出链接表，方便确认 state 里选中的会话和详情 URL。
 - `singlefile`：适合保留页面归档，不适合作为主要分析输入。
 
 ## 典型 Hermes 命令模板
@@ -329,10 +332,10 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
 
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select --all
 
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --kind links
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
   --kind structured \
-  --formats json,markdown \
-  --via cdp
+  --formats json,markdown
 ```
 
 ### 只抓某个客服
@@ -351,10 +354,10 @@ python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run collect \
 
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml roles select --include "$ROLE"
 
+python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export --kind links
 python3 -m im_archive_cli.imx_cli --config .im_archive/config.yaml run export \
   --kind structured \
-  --formats json,markdown \
-  --via cdp
+  --formats json,markdown
 ```
 
 ### 只导出链接表
@@ -396,7 +399,7 @@ python3 -m im_archive_cli.imx_cli run collect \
 
 python3 -m im_archive_cli.imx_cli roles select --all
 python3 -m im_archive_cli.imx_cli run export --kind links
-python3 -m im_archive_cli.imx_cli run export --kind structured --formats "${STRUCTURED_FORMATS:-json}"
+python3 -m im_archive_cli.imx_cli run export --kind structured --formats "${STRUCTURED_FORMATS:-json,markdown}"
 python3 -m im_archive_cli.imx_cli state watch --once
 ```
 
@@ -438,7 +441,7 @@ PY
 判定规则：
 
 - `collected=0` 且当天预期有咨询：失败，需要检查登录态、日期、接口契约。
-- JSON 文件存在但 `messages=0`：失败，需要检查详情页是否登录、`sessionId` 是否被截断、`detail-page.js` 选择器是否失效。
+- JSON 文件存在但 `messages=0`：失败，需要检查 `getMessagesBySession` 请求体、请求头、分页参数和登录态；不要回退到 DOM 抓取。
 - `run export` 出现 `failed>0`：不算全成功；读取 `failures_file`。
 - `--via http` 403 不代表登录态完全失效；优先验证 `--via cdp`。
 
@@ -552,9 +555,9 @@ curl -s http://localhost:3456/targets
 
 ### 403
 
-症状：`--via http` 返回 403。
+症状：`structured --via http` 返回 401/403，或业务错误提示登录态、Token、风控。
 
-处理：改用默认 `--via cdp`。如果 `--via cdp` 也失败，检查页面是否登录、是否出现风控/登录墙。
+处理：不要循环重试，也不要把 structured export 改成 `--via cdp`。先刷新登录态，再执行 `discover detail-xhr` 复核详情消息接口合同和 Cookie 同步状态。`collect --via cdp` 仍可作为列表采集验证，不代表 HTTP 详情导出一定可用。
 
 ### 空会话或空消息
 
@@ -599,4 +602,5 @@ python3 -m im_archive_cli.imx_cli state watch --once
 - 不要把 Cookie、Authorization、cticket、完整请求头写入日志、README、skill 或 durable memory。
 - 不要在 403 后无限重试；最多做一次 `cdp` 模式验证，然后告警。
 - 不要用纯 requests 成功与否判断整个携程登录态；以当前已登录浏览器页面为真相面。
-- 不要把 `structured` / `singlefile` 改回 chromedriver 依赖；Hermes 自动主机应走 `cdp_proxy_base_url`。
+- 不要把 `structured` 改回 CDP/Selenium DOM 抓取；结构化 JSON/Markdown 只走已验证详情接口的 HTTP 请求。
+- 不要把 `singlefile` 改回 chromedriver 依赖；Hermes 自动主机应走 `cdp_proxy_base_url` 或兼容该接口的 proxy。

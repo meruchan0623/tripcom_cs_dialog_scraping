@@ -232,7 +232,7 @@ imx run retry-failures --kind structured --retryable-only --request-budget 30 --
 
 ## Python CDP 控制台（imx）
 
-本仓库新增 `imx` 命令：Python 通过 CLI 执行采集/筛选/导出。会话采集默认走“模拟前端请求”模式：复用当前已登录的 `vbooking.ctrip.com` 页面，在页面上下文内直接 `fetch` 携程后台 SOA 接口，不再依赖展开表格的 DOM 点击循环。结构化和 SingleFile 导出同样复用 web-access CDP proxy 的当前登录浏览器，不再依赖 chromedriver 下载。
+本仓库新增 `imx` 命令：Python 通过 CLI 执行采集/筛选/导出。会话采集默认走“模拟前端请求”模式：复用当前已登录的 `vbooking.ctrip.com` 页面，在页面上下文内直接 `fetch` 携程后台 SOA 接口，不再依赖展开表格的 DOM 点击循环。结构化 JSON/Markdown 导出只走已验证详情接口的 HTTP 请求；SingleFile HTML 归档继续复用 web-access CDP proxy 的当前登录浏览器。
 `imx chrome start` 会自动准备并加载当前仓库扩展（开发者模式 `--load-extension`），无需手工去 `chrome://extensions` 点击“加载已解压扩展”。
 
 ### 安装
