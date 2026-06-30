@@ -428,6 +428,23 @@ class CtripImHttpClient:
         return dedupe_sessions(all_sessions)
 
 
+def _target_identifier(target: dict[str, Any]) -> str:
+    return str(target.get("targetId") or target.get("id") or "")
+
+
+def _select_vbooking_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
+    for require_imexperience in (True, False):
+        for target in targets:
+            url = str(target.get("url") or "")
+            if "vbooking.ctrip.com" not in url:
+                continue
+            if require_imexperience and "IMExperience" not in url:
+                continue
+            if _target_identifier(target):
+                return target
+    raise RuntimeError("未找到已登录的 vbooking.ctrip.com 页面；请先在浏览器打开携程 IMExperience 页面")
+
+
 class CtripImCdpFetchClient(CtripImHttpClient):
     """Run the same SOA requests through an already logged-in vbooking page."""
 
@@ -453,16 +470,10 @@ class CtripImCdpFetchClient(CtripImHttpClient):
 
     def _find_vbooking_target(self) -> str:
         with urllib.request.urlopen(f"{self.proxy_base_url}/targets", timeout=5) as resp:  # noqa: S310
-            targets = json.loads(resp.read().decode("utf-8"))
-        for target in targets:
-            url = str(target.get("url") or "")
-            if "vbooking.ctrip.com" in url and "IMExperience" in url:
-                return str(target["targetId"])
-        for target in targets:
-            url = str(target.get("url") or "")
-            if "vbooking.ctrip.com" in url:
-                return str(target["targetId"])
-        raise RuntimeError("未找到已登录的 vbooking.ctrip.com 页面；请先在浏览器打开携程 IMExperience 页面")
+            raw_targets = json.loads(resp.read().decode("utf-8"))
+        targets = raw_targets if isinstance(raw_targets, list) else []
+        target = _select_vbooking_target(targets)
+        return _target_identifier(target)
 
     def post_json(self, url: str, body: dict[str, Any], timeout: int = 45) -> dict[str, Any]:
         elapsed = time.monotonic() - self.last_request_at

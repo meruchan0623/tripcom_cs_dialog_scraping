@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import requests
 
+from im_archive_cli import ctrip_http
 from im_archive_cli.config import AppConfig
 from im_archive_cli.ctrip_http import (
     CustomerServiceAccount,
     CtripHttpError,
+    CtripImCdpFetchClient,
     CtripImDetailHttpClient,
     CtripImHttpClient,
     CtripRequestBudget,
@@ -20,6 +24,24 @@ from im_archive_cli.ctrip_http import (
     normalize_detail_messages,
 )
 from im_archive_cli.models import SessionRecord
+
+
+class FakeUrlopenResponse:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "FakeUrlopenResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
+
+def url_text(url: object) -> str:
+    return str(getattr(url, "full_url", url))
 
 
 def test_build_session_body_matches_captured_contract() -> None:
@@ -150,6 +172,49 @@ def test_http_client_collects_sessions_from_stubbed_responses(monkeypatch: pytes
 
     assert [s.session_id for s in sessions] == ["s1", "s2"]
     assert sessions[0].cs_name == "vbk_1/Alice"
+
+
+def test_cdp_fetch_client_uses_proxy_target_id_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_urls: list[str] = []
+
+    def fake_urlopen(url, timeout=5):
+        seen_urls.append(url_text(url))
+        assert url_text(url) == "http://localhost:3456/targets"
+        return FakeUrlopenResponse(
+            [
+                {
+                    "targetId": "proxy-target-1",
+                    "url": "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+
+    client = CtripImCdpFetchClient(AppConfig(), request_interval_sec=0)
+
+    assert client.target_id == "proxy-target-1"
+    assert seen_urls == ["http://localhost:3456/targets"]
+
+
+def test_cdp_fetch_client_accepts_chrome_devtools_id_schema_from_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_urlopen(url, timeout=5):
+        assert url_text(url) == "http://localhost:3456/targets"
+        return FakeUrlopenResponse(
+            [
+                {
+                    "id": "devtools-page-1",
+                    "webSocketDebuggerUrl": "ws://devtools-page-1",
+                    "url": "https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+
+    client = CtripImCdpFetchClient(AppConfig(), request_interval_sec=0)
+
+    assert client.target_id == "devtools-page-1"
 
 
 def test_request_budget_stops_before_extra_http_request(tmp_path) -> None:
