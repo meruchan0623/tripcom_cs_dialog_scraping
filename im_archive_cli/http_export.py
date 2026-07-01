@@ -97,8 +97,8 @@ def export_structured_via_http(
     for batch_start in range(0, len(pending), max_workers):
         if batch_start > 0:
             time.sleep(interval)
-        if consecutive_retryable_failures >= 3 or consecutive_fatal_failures >= 3:
-            log("连续接口失败达到 3 次，已停止本轮结构化导出")
+        if consecutive_retryable_failures >= 3 or consecutive_fatal_failures >= 50:
+            log("连续接口失败达到阈值，已停止本轮结构化导出")
             break
         batch = pending[batch_start : batch_start + max_workers]
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

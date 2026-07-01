@@ -5,17 +5,44 @@ log_dir: .im_archive/logs
 failures_file: .im_archive/failures.jsonl
 vbooking_url: https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience
 detail_base_url: https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=
+ctrip_auth_json: /Users/tsimclaw/Documents/ctrip-cli-sessions/ctrip_auth_plain.json
+ctrip_cookie_header_file: /Users/tsimclaw/Documents/ctrip-cli-sessions/ctrip_cookie_header.txt
+ctrip_im_butype: 品类活动
+ctrip_im_consultation_scene: aggregate
+ctrip_im_product_channel: aggregate
+ctrip_im_currency_type: CNY
+ctrip_im_detail_messages_url: https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession
+ctrip_im_detail_extra_body:
+  head:
+    cver: '2'
+    extension:
+    - name: cpc
+      value: pc
+    - name: protocal
+      value: https
+    - name: amp-product-type
+      value: IM
+    - name: amp-account-source
+      value: vbk
+    - name: client-source
+      value: ''
+    - name: locale
+      value: zh-CN
+ctrip_im_detail_page_size: 100
+ctrip_im_detail_verified_source: browser_detail_xhr
+ctrip_im_detail_verified_url: ''
+ctrip_im_detail_verified_at: '2026-06-30T17:16:29.564483+00:00'
+cdp_proxy_base_url: http://localhost:3456
 page_size: 1000
 max_pages: 50
-concurrency: 2
-window_sec: 4
-ctrip_request_interval_sec: 1.0
-structured_request_interval_sec: 0.5
+concurrency: 16
+window_sec: 0
+ctrip_request_interval_sec: 0.2
+structured_request_interval_sec: 0
 ctrip_request_budget_max: 30
 output_prefix: IM_Archive
 headless: true
 timezone: Asia/Shanghai
-# Hermes Remote Debugging allocation: Ctrip/Tripcom main signed-in browser session.
 cdp_port: 9222
 chrome_path: /Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
 extension_id: ''
@@ -25,8 +52,8 @@ extension_runtime_dir: .im_archive/runtime_extensions
 chrome_state_file: .im_archive/chrome_state.json
 cdp_poll_interval_sec: 1.0
 browser_delay_between_pages_ms: 500
-download_images: true
-image_max_workers: 2
-image_request_interval_sec: 1.0
+download_images: false
+image_max_workers: 8
+image_request_interval_sec: 0
 image_timeout_sec: 30
 image_max_bytes: 20971520
