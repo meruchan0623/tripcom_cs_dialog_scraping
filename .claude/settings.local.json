@@ -5,7 +5,8 @@
       "Bash(cd C:\\\\\\\\Develop\\\\\\\\im-archive-extension)",
       "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\background.js\")",
       "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\popup.js\")",
-      "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\singlefile-runner.js\")"
+      "Bash(node -c \"C:\\\\Develop\\\\im-archive-extension\\\\singlefile-runner.js\")",
+      "Bash(ls -la /Users/tashima_meru/Library/CloudStorage/OneDrive-个人/文档/ctrip-cli-sessions/ 2>/dev/null)"
     ]
   }
 }
