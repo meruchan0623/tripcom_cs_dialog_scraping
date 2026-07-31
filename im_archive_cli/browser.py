@@ -4,9 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-import undetected_chromedriver as uc
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.remote.webdriver import WebDriver
+from ego_browser_compat import Options, WebDriver, webdriver
 
 from .config import AppConfig
 
@@ -22,7 +20,7 @@ def persistent_context(config: AppConfig, headless: bool | None = None) -> Itera
     options.add_argument("--disable-blink-features=AutomationControlled")
     if mode:
         options.add_argument("--headless=new")
-    driver = uc.Chrome(options=options, use_subprocess=True)
+    driver = webdriver.Chrome(options=options)
     try:
         yield driver
     finally:
