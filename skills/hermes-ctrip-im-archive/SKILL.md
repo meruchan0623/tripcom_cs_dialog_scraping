@@ -39,6 +39,12 @@ Hermes Remote Debugging allocation: `9222` 固定给 Ctrip/Tripcom 主已登录�
 
 - 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`，所以会话列表采集优先使用 `collect --via cdp`。
 - `structured` 导出只支持 `--via http`。使用前应先通过 `discover detail-xhr` 验证并写回 `ctrip_im_detail_messages_url`。
+- 图片默认从可下载 URL 写为 `_assets/` 下的普通图片文件。禁止把 Base64 字符串保存进 JSON、sidecar 或图片文件；携程内联 Base64 图片载荷会在写出前被拒绝并清除。
+- 仅当调用方明确要求纯文本、无图片产物时，Hermes 才可追加 `--no-images`。该开关同时禁止下载并移除 JSON/Markdown 图片引用、禁止生成图片索引，且不写回配置：
+
+```bash
+python3 -m im_archive_cli.imx_cli run export --kind structured --formats json,markdown --no-images
+```
 - `--via cdp` 仍用于采集列表、请求发现、预检和 SingleFile 页面归档；不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
 
 ## 历史咨询筛选请求

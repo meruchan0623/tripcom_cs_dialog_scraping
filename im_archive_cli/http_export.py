@@ -168,15 +168,43 @@ def _fetch_and_write_session(
         raise ExportStageError("fetch_conversation", RuntimeError("提取失败：返回数据缺少 messages"))
     if not messages:
         raise ExportStageError("fetch_conversation", RuntimeError("提取失败：messages 为空"))
+    if not config.export_images:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            attachments = message.get("attachments")
+            if isinstance(attachments, list):
+                message["attachments"] = [
+                    attachment
+                    for attachment in attachments
+                    if not isinstance(attachment, dict) or attachment.get("source") != "messageBody"
+                ]
     try:
-        download_conversation_images(data, json_path.parent, json_path.stem, config, log)
+        data = _remove_inline_base64_images(data)
+        messages = data.get("messages", [])
+        if config.export_images:
+            download_conversation_images(data, json_path.parent, json_path.stem, config, log)
     except Exception as exc:  # noqa: BLE001
         raise ExportStageError("download_images", exc) from exc
     try:
         if "json" in formats:
             write_text_atomic(json_path, json.dumps(data, ensure_ascii=False, indent=2))
-            write_conversation_image_index(data, json_path)
+            if config.export_images:
+                write_conversation_image_index(data, json_path)
         if "markdown" in formats:
             write_text_atomic(md_path, create_markdown(sess, messages))
     except Exception as exc:  # noqa: BLE001
         raise ExportStageError("write_output", exc) from exc
+
+def _remove_inline_base64_images(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _remove_inline_base64_images(item)
+            for key, item in value.items()
+            if str(key).lower() != "encodestring"
+        }
+    if isinstance(value, list):
+        return [_remove_inline_base64_images(item) for item in value]
+    if isinstance(value, str) and value.lstrip().lower().startswith("data:image/") and ";base64," in value.lower():
+        return "[image data omitted]"
+    return value

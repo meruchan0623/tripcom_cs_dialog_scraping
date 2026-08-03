@@ -49,6 +49,7 @@ class AppConfig:
     cdp_poll_interval_sec: float = 1.0
     browser_delay_between_pages_ms: int = 120
     download_images: bool = True
+    export_images: bool = True
     image_max_workers: int = 4
     image_request_interval_sec: float = 0.5
     image_timeout_sec: int = 30

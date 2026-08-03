@@ -249,7 +249,9 @@ def cmd_run_export(
     request_ledger: str | None = None,
     concurrency: int | None = None,
     request_interval_sec: float | None = None,
+    no_images: bool = False,
 ) -> int:
+    cfg.export_images = not no_images
     _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
     budget_limit = _normalize_request_budget(request_budget, "export", _request_budget_max(cfg))
     if request_ledger and budget_limit is None:
@@ -351,7 +353,9 @@ def cmd_run_retry_failures(
     request_ledger: str | None = None,
     concurrency: int | None = None,
     request_interval_sec: float | None = None,
+    no_images: bool = False,
 ) -> int:
+    cfg.export_images = not no_images
     _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
     if kind != "structured":
         raise RuntimeError("retry-failures 目前只支持 --kind structured")
@@ -648,6 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--request-interval-sec", type=float, default=None, help="覆盖本次结构化导出 worker 内请求间隔秒数；不传则使用 config.yaml")
     export.add_argument("--request-budget", type=int, default=None, help="本次 HTTP export 最多允许发出的携程接口请求数，最大 30")
     export.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
+    export.add_argument("--no-images", action="store_true", help="本次运行不下载图片，也不在 JSON/Markdown/图片索引中输出图片引用")
     retry_failures = run_sub.add_parser("retry-failures")
     retry_failures.add_argument("--kind", choices=["structured"], required=True)
     retry_failures.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
@@ -657,6 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry_failures.add_argument("--request-interval-sec", type=float, default=None, help="覆盖本次重跑 worker 内请求间隔秒数；不传则使用 config.yaml")
     retry_failures.add_argument("--request-budget", type=int, default=None, help="本次 retry 最多允许发出的携程接口请求数，最大 30")
     retry_failures.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
+    retry_failures.add_argument("--no-images", action="store_true", help="本次重跑不下载图片，也不输出图片引用")
 
     roles = sub.add_parser("roles")
     roles_sub = roles.add_subparsers(dest="roles_command")
@@ -753,6 +759,7 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             request_ledger=args.request_ledger,
             concurrency=args.concurrency,
             request_interval_sec=args.request_interval_sec,
+            no_images=args.no_images,
         )
     if args.command == "run" and args.run_command == "retry-failures":
         return cmd_run_retry_failures(
@@ -766,6 +773,7 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             request_ledger=args.request_ledger,
             concurrency=args.concurrency,
             request_interval_sec=args.request_interval_sec,
+            no_images=args.no_images,
         )
     if args.command == "roles" and args.roles_command == "list":
         return cmd_roles_list(cfg)

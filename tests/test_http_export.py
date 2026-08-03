@@ -296,6 +296,40 @@ def test_export_structured_via_http_downloads_images_and_renders_markdown(tmp_pa
     assert f"![图片]({rel_path})" in markdown
 
 
+def test_export_structured_via_http_no_images_omits_download_references_and_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = AppConfig(
+        output_dir=str(tmp_path / "out"),
+        failures_file=str(tmp_path / "failures.jsonl"),
+        window_sec=0,
+        export_images=False,
+    )
+    session = SessionRecord(session_id="s1", cs_name="Alice", create_time="2026-06-16 09:00:00").normalized()
+
+    class ImageMessageClient:
+        def fetch_conversation(self, session: SessionRecord) -> dict:
+            return {
+                "sessionId": session.session_id,
+                "messages": [{"sequence": 1, "messageType": "image", "text": "[图片]", "attachments": [
+                    {"src": "data:image/png;base64,AAAA", "source": "messageBody"}
+                ]}],
+            }
+
+    def fail_download(*_args, **_kwargs) -> None:
+        raise AssertionError("no-images must not download")
+
+    monkeypatch.setattr("im_archive_cli.http_export.download_conversation_images", fail_download)
+    success, failed = export_structured_via_http(ImageMessageClient(), cfg, [session], ["json", "markdown"], lambda _msg: None)
+
+    assert (success, failed) == (1, 0)
+    json_path = _conversation_json_files(tmp_path / "out")[0]
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["messages"][0]["attachments"] == []
+    assert "base64" not in json_path.read_text(encoding="utf-8").lower()
+    assert not list((tmp_path / "out").rglob("*_assets"))
+    assert not list((tmp_path / "out").rglob("*.image-index.json"))
+    assert "![图片]" not in next((tmp_path / "out").rglob("*.md")).read_text(encoding="utf-8")
+
+
 def test_export_structured_via_http_writes_image_index_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = AppConfig(
         output_dir=str(tmp_path / "out"),

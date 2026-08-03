@@ -52,7 +52,7 @@ extension_runtime_dir: .im_archive/runtime_extensions
 chrome_state_file: .im_archive/chrome_state.json
 cdp_poll_interval_sec: 1.0
 browser_delay_between_pages_ms: 500
-download_images: false
+download_images: true
 image_max_workers: 8
 image_request_interval_sec: 0
 image_timeout_sec: 30

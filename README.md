@@ -358,7 +358,8 @@ bash scripts/openclaw_structured_export.sh --roles "张三,李四"
   - `localPath`、`relativePath`、`src`、`thumbSrc`
   - `source`、`downloadStatus`
 - Markdown 渲染：优先使用 `![alt](...)` 引用导出的本地路径
-- 关闭正文图片导出：在配置文件中设置 `download_images: false`
+- 图片只允许保存为 `_assets/` 下的普通二进制图片文件；禁止把 Base64 字符串写入会话 JSON、图片索引或最终图片文件。携程链路只接受可下载的图片 URL，内联 Base64 图片载荷会在写出前被拒绝并清除。
+- Hermes 若明确需要纯文本产物，可在本次命令传入 `--no-images`：`imx run export --kind structured --formats json,markdown --no-images`。该参数同时禁止图片下载，并从 JSON/Markdown 中移除正文图片引用且不生成图片索引；它只影响本次运行，不写回配置。
 - 相关实现边界与失败处理请按
   [AGENT 图片参考手册](./docs/AGENT_IMAGE_REFERENCE_GUIDE.md)
   执行（包括头像/卡片图忽略规则和 `downloadStatus=failed` 处理）
@@ -466,6 +467,7 @@ imx roles select --include "张三,李四"
 - `--via http`：仅 `structured` 生效；结构化 JSON/Markdown 导出只支持纯 Python requests 详情消息
 - `--concurrency <int>`：覆盖本次结构化导出请求线程数/并发数；不传则使用 `config.yaml` 的 `concurrency`
 - `--request-interval-sec <float>`：覆盖本次结构化导出 worker 内请求间隔秒数；不传则使用 `config.yaml` 的 `structured_request_interval_sec`
+- `--no-images`：仅本次结构化导出不下载图片、不输出图片附件引用、不生成图片索引；默认不传，正常导出图片文件
 - `--request-budget <int>`：本次 HTTP 详情导出最多允许发出的携程接口请求数，最大 `30`
 - `--request-ledger <path>`：跨多条命令累计请求数的 JSON 账本；必须配合 `--request-budget 30` 使用，建议与发现/采集命令共用同一路径
 

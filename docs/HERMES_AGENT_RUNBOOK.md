@@ -273,6 +273,9 @@ POST https://m.ctrip.com/restapi/soa2/16037/getMessagesBySession
 
 ```bash
 imx run export --kind structured --via http
+
+# 明确需要纯文本、无图片产物时才使用；本次运行不下载也不输出图片引用
+imx run export --kind structured --via http --no-images
 ```
 
 如果 HTTP 详情导出返回 `401/403` 或 `messages` 为空，不要回退到 CDP/Selenium DOM 聊天记录抓取。应先执行 `discover detail-xhr` 复核 `getMessagesBySession` 请求体、请求头和登录态，再修正配置。
@@ -280,6 +283,8 @@ imx run export --kind structured --via http
 ## 5. 典型执行链路
 
 ### 图片导出验收
+
+默认合同是普通图片文件落盘，禁止 Base64-at-rest。`--no-images` 是 Hermes 的显式纯文本模式：不创建 `_assets/`、不生成 `*.image-index.json`，且会从 JSON/Markdown 移除正文图片引用。
 
 对结构化导出的正文图片，运行一次检查并确认：
 
