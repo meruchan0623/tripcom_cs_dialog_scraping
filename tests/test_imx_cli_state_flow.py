@@ -32,6 +32,12 @@ def make_cfg(tmp_path: Path) -> AppConfig:
     )
 
 
+def test_structured_export_accepts_no_images_runtime_option() -> None:
+    args = imx_cli.build_parser().parse_args(["run", "export", "--kind", "structured", "--no-images"])
+
+    assert args.no_images is True
+
+
 def seed_state(cfg: AppConfig) -> None:
     StateStore(Path(cfg.state_file)).set_sessions(
         [
@@ -269,10 +275,11 @@ def test_main_collect_cdp_reports_proxy_and_devtools_discovery_failure_without_t
     cfg_path = tmp_path / "config.yaml"
     save_config(cfg_path, cfg)
 
-    def fake_urlopen(url, timeout=5):
-        raise TimeoutError("timed out")
-
-    monkeypatch.setattr(ctrip_http.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        ctrip_http.WebDriver,
+        "__init__",
+        lambda self: (_ for _ in ()).throw(RuntimeError("ego-browser unavailable")),
+    )
 
     rc = main(
         [
@@ -291,8 +298,7 @@ def test_main_collect_cdp_reports_proxy_and_devtools_discovery_failure_without_t
 
     captured = capsys.readouterr()
     assert rc == 1
-    assert "cdp_proxy_base_url 不可用" in captured.err
-    assert "127.0.0.1:9222 DevTools endpoint" in captured.err
+    assert "ego-browser unavailable" in captured.err
     assert "Traceback" not in captured.err
 
 

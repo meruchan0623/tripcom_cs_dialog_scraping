@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from selenium.webdriver.remote.webdriver import WebDriver
+from ego_browser_compat import WebDriver
 
 from .browser import execute_js, execute_js_async
 from .config import AppConfig
