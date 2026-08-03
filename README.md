@@ -60,9 +60,8 @@ tripcom_cs_dialog_scraping/
 
 - 工作目录：进入仓库根目录 `/Users/tashima_meru/Develop/tripcom_cs_dialog_scraping` 后再执行命令。
 - Python：`pyproject.toml` 要求 `Python >= 3.10`。
-- 浏览器：`config.yaml` 当前指向 `/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`；如果目标机器不同，先改 `chrome_path` 或留空让程序自动探测。
-- 扩展目录：`extension_dir: .` 表示加载当前仓库根目录的 Manifest V3 扩展；目标目录必须包含 `manifest.json`。
-- 登录态：首次运行必须人工登录一次；后续复用 `.im_archive/profile` 和 `ctrip-cli-sessions` 文件。
+- 浏览器：Hermes 鉴权和页面上下文请求使用 ego lite；不要为本项目启动 Edge/Chrome 调试端口。旧的 `chrome_path`、扩展和 CDP 配置仅为兼容历史命令保留。
+- 登录态：首次运行时在 ego-browser 任务空间完成 vbooking 登录；后续由任务空间继承登录态，并按需写入 `ctrip-cli-sessions` 的私有会话材料。
 - 密钥与 Cookie：不要把真实 Cookie、账号密码、验证码、Authorization 写进 README、日志、提交或工件；只允许使用本地私有文件或环境外部注入。
 
 ### 首次初始化
@@ -230,9 +229,9 @@ imx run retry-failures --kind structured --retryable-only --request-budget 30 --
 - 确认登录态仍然有效
 - 查看弹窗日志定位具体 `sessionId`
 
-## Python CDP 控制台（imx）
+## Python 运行控制台（imx）
 
-本仓库新增 `imx` 命令：Python 通过 CLI 执行采集/筛选/导出。会话采集默认走“模拟前端请求”模式：复用当前已登录的 `vbooking.ctrip.com` 页面，在页面上下文内直接 `fetch` 携程后台 SOA 接口，不再依赖展开表格的 DOM 点击循环。结构化 JSON/Markdown 导出只走已验证详情接口的 HTTP 请求；SingleFile HTML 归档继续复用 web-access CDP proxy 的当前登录浏览器。
+本仓库新增 `imx` 命令：Python 通过 CLI 执行采集/筛选/导出。会话采集默认走“模拟前端请求”模式：通过 ego-browser 复用当前已登录的 `vbooking.ctrip.com` 页面，在页面上下文内直接 `fetch` 携程后台 SOA 接口，不再依赖展开表格的 DOM 点击循环。结构化 JSON/Markdown 导出只走已验证详情接口的 HTTP 请求；SingleFile HTML 归档仍保留历史 proxy 路径，但不用于登录态导入。
 `imx chrome start` 会自动准备并加载当前仓库扩展（开发者模式 `--load-extension`），无需手工去 `chrome://extensions` 点击“加载已解压扩展”。
 
 ### 安装
@@ -424,7 +423,7 @@ imx auth status
 - `--end-date <YYYY-MM-DD>`：历史咨询结束日期，默认同开始日期
 - `--include "A,B,C"`：只采集指定客服，可填完整显示名、账号 ID 或昵称
 - `--via cdp|http|browser`：
-  - `cdp`：默认；在当前已登录携程页面上下文执行真实前端 `fetch`
+- `cdp`：历史 CLI 名称；实际在 ego-browser 当前已登录携程页面上下文执行真实前端 `fetch`
   - `http`：纯 Python requests，读取 `ctrip-cli-sessions` 中的 Cookie header；部分接口可能被 403 拦截
   - `browser`：旧扩展点击采集路径，作为兼容兜底；该路径无法精确接入请求账本，使用请求预算时请选 `cdp` 或 `http`
 - `--concurrency <int>`：覆盖本次运行请求线程数/并发数；不传则使用 `config.yaml` 的 `concurrency`
@@ -666,25 +665,22 @@ imx run export --kind links
 Agent 初始化机器时可以直接使用仓库根目录的 `config.yaml`。如果文件不存在，程序会按 `im_archive_cli/config.py` 的默认值生成。
 
 路径与状态：
-- `profile_dir`：Chrome 持久登录目录，默认 `.im_archive/profile`。
+- `profile_dir`：历史 Chrome 持久登录目录配置，当前 Hermes 鉴权不使用它；登录态由 ego lite 任务空间管理。
 - `state_file`：Python 会话池与角色选择状态，默认 `.im_archive/state.json`。
 - `output_dir`：导出根目录，当前仓库配置为 `/Users/tsimclaw/Downloads/Ctrip-CS-dialog`，代码默认值为 `.im_archive/output`。
 - `log_dir`：运行日志目录，默认 `.im_archive/logs`。
 - `failures_file`：失败账本，默认 `.im_archive/failures.jsonl`。
-- `chrome_state_file`：运行中 Chrome 进程/端口信息，默认 `.im_archive/chrome_state.json`。
+- `chrome_state_file`：历史 Chrome 运行状态文件，当前 Hermes 鉴权不依赖它。
 - `extension_runtime_dir`：运行时扩展目录，默认 `.im_archive/runtime_extensions`。
 
 浏览器与扩展：
 - `vbooking_url`：采集入口页，默认 `https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience`。
 - `detail_base_url`：详情页 URL 前缀，默认 `https://imvendor.ctrip.com/queryMessages?accountsource=vbk&sessionId=`。
-- `cdp_port`：原生 CDP 端口，默认 `9222`。
-- `chrome_path`：浏览器可执行文件；为空时自动探测。当前仓库配置为 Microsoft Edge。
+- `cdp_port`、`chrome_path`：历史兼容配置；当前 Hermes 鉴权和页面上下文使用 ego lite，不启动或探测 Edge/Chrome 调试端口。
 - `extension_id`：扩展 ID；通常留空，由程序探测。
 - `load_unpacked_extension`：是否加载未打包扩展，默认 `true`。
 - `extension_dir`：扩展源码目录，默认 `.`，必须包含 `manifest.json`。
-- `cdp_poll_interval_sec`：CDP 状态轮询间隔，默认 `1.0`。
-- `cdp_proxy_base_url`：web-access CDP proxy 地址，默认 `http://localhost:3456`。
-  当该 proxy 的 `/targets` 超时但 `cdp_port` 指向的 Edge/Chrome DevTools 正常时，`run collect --via cdp` 会自动读取 `http://127.0.0.1:<cdp_port>/json/list`，接受 DevTools 原生 `id` 字段，并通过目标页的 `webSocketDebuggerUrl` 执行 `Runtime.evaluate`。SingleFile 归档仍需要 `cdp_proxy_base_url` 提供 `/new`、`/eval`、`/close`。
+- `cdp_poll_interval_sec`、`cdp_proxy_base_url`：历史兼容配置。`--via cdp` 的实际页面上下文由 ego-browser 提供；Hermes 不应配置或排查 DevTools proxy 作为登录恢复路径。
 
 登录态与纯 HTTP 请求：
 - `ctrip_cookie_header_file`：优先读取的 Cookie header 文本文件。

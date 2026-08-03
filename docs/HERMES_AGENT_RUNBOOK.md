@@ -2,7 +2,7 @@
 
 本文档给 Hermes Agent 运行机器使用，说明如何在本项目中采集携程客服历史咨询会话、导出对话详情、传入筛选参数、理解接口请求体，以及对结果做过滤分析。
 
-Remote Debugging 端口分配：`9222` 固定给 Ctrip/Tripcom 主已登录浏览器会话。`ctrip-get-comment-cli` 可复用 `9222` 做主认证检查，并保留 `9224` 作为评论导出的 Default profile fallback。KKday Hermes 自动任务不使用浏览器端口；Trip SKU/price cron 不预留固定 `922x` 端口。
+浏览器鉴权约定：携程 IM 采集使用 ego lite 的已登录任务空间。不要为本项目启动、共享或排查 Edge/Chrome 的 Remote Debugging 端口；`--via cdp` 只是历史 CLI 参数名。携程评价项目使用独立任务空间 `ctrip-comment-auth`，不要与 IM 采集任务混用登录态。
 
 ## 1. 总览
 
@@ -21,7 +21,7 @@ python3 -m im_archive_cli.imx_cli --help
 当前已验证的正式链路：
 
 ```text
-已登录 vbooking 页面 / CDP Proxy
+ego lite 中已登录的 vbooking 页面
   -> run collect --via cdp
   -> state.json 会话池
   -> roles select
@@ -33,7 +33,7 @@ python3 -m im_archive_cli.imx_cli --help
 重要结论：
 
 - `run export --kind structured` 只支持 `--via http`，通过已验证的 `16037/getMessagesBySession` 请求合同导出 JSON/Markdown。
-- `--via cdp` 仍用于采集列表、请求发现、预检和 SingleFile 页面归档；不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
+- `--via cdp` 是兼容参数名；采集列表由 ego-browser 的已登录页面上下文执行真实前端 `fetch`。不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
 - 日期区间可用 CLI 参数传入；客人来源和咨询场景当前通过配置字段传入。
 
 ## 2. 前置条件
@@ -44,37 +44,10 @@ python3 -m im_archive_cli.imx_cli --help
 python3 -m im_archive_cli.imx_cli --help
 ```
 
-检查 web-access CDP Proxy：
-
-```bash
-curl -s http://localhost:3456/targets
-```
-
-检查是否已有携程后台页面：
-
-```bash
-curl -s http://localhost:3456/targets | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience'
-```
-
-如果 `curl http://localhost:3456/targets` 超时，但 Edge/Chrome DevTools 端口正常：
-
-```bash
-curl -s http://127.0.0.1:9222/json/list | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience|webSocketDebuggerUrl'
-```
-
-`run collect --via cdp` 会自动 fallback 到 `127.0.0.1:<cdp_port>` DevTools endpoint。日志中应出现：
-
-```text
-cdp_proxy_base_url 不可用，已 fallback 到 127.0.0.1:9222 DevTools endpoint
-```
-
-如果 direct DevTools 也不可用，先重新启动带 `--remote-debugging-port` 的 Edge/Chrome，或修正 `config.yaml` 的 `cdp_port`。
-
-如果没有页面，打开入口页并完成登录：
-
-```bash
-open 'https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience'
-```
+1. 启动 ego lite，并让 Hermes 使用当前任务的浏览器上下文。
+2. 打开 `https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience`。
+3. 若进入登录页、验证码或人机校验，Hermes 必须将任务空间交给用户操作，等待用户明确确认登录完成后再继续。
+4. 登录完成后运行一次小日期窗口的 `run collect --via cdp` 验证页面上下文；不要复制 Cookie、Token 或启动调试浏览器。
 
 检查配置：
 
@@ -546,22 +519,13 @@ python skills/ctrip-im-parser/scripts/scan_im.py \
 
 ## 9. 故障处理
 
-### 9.1 CDP Proxy 不可用
+### 9.1 ego-browser 不可用或未登录
 
-```bash
-node /Users/tashima_meru/.cc-switch/skills/web-access/scripts/check-deps.mjs
-curl -s http://localhost:3456/targets
-```
+确认 ego lite 已启动，并在当前任务空间重新打开携程后台页面。若页面要求登录、短信/OTP 或验证码，交还任务空间给用户并等待明确确认；不要改用 Edge/Chrome 调试端口作为替代鉴权方式。
 
 ### 9.2 找不到 vbooking 页面
 
-打开入口并登录：
-
-```bash
-open 'https://vbooking.ctrip.com/micro/tour-bi-vendor-new/#/tour/quality/IMExperience'
-```
-
-Hermes 自动任务遇到登录墙时应停止并告警，不应无限重试。
+在 ego lite 当前任务空间打开入口并登录。Hermes 自动任务遇到登录墙时应停止并等待用户确认，不应无限重试。
 
 ### 9.3 输出目录无权限
 

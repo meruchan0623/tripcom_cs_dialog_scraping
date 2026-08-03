@@ -3,7 +3,7 @@ name: hermes-ctrip-im-archive
 description: |
   在 Hermes Agent 主机上自动运行 tripcom_cs_dialog_scraping 的携程 IM 会话采集与归档 CLI。
   当任务涉及定时/无人值守抓取携程 vbooking IMExperience 会话、导出 IMChatlogExport JSON/Markdown/HTML/XLSX、
-  检查 web-access CDP proxy、复用已登录浏览器态、处理 403/登录失效/空结果/导出失败、
+  复用 ego-browser 已登录浏览器态、处理 403/登录失效/空结果/导出失败、
   或为 Hermes 自动任务编排该项目时触发。
 ---
 
@@ -13,19 +13,19 @@ description: |
 
 在 Hermes Agent 主机上无人值守执行携程 IM 会话归档：
 
-1. 复用已登录浏览器页面或 CDP proxy。
+1. 复用 ego-browser 的已登录 vbooking 任务空间。
 2. 通过 `imx run collect` 模拟前端请求采集会话列表。
 3. 通过 Python state 完成角色筛选、链接表导出、结构化 JSON/Markdown 导出、SingleFile HTML 导出。
 4. 用命令输出和产物回读确认本次运行是否成功。
 
-Hermes Remote Debugging allocation: `9222` 固定给 Ctrip/Tripcom 主已登录浏览器会话。不要把 KKday、Klook、eSIM 或 Trip SKU cron 迁到这个端口；`ctrip-get-comment-cli` 可读取 `9222` 作为主 Ctrip 登录态，并只在缺认证时使用自己的 `9224` fallback。
+Hermes 浏览器约定：携程 IM 使用 ego-browser 任务空间；`ctrip-get-comment-cli` 使用 `ctrip-comment-auth`。不要为这两个项目启动、共享或排查 `9222` / `9224` 调试端口。
 
 ## 已验证链路
 
 当前项目在 Hermes/Agent 机器上的已验证链路是：
 
 1. `run collect --via cdp`：
-   复用已登录的 `vbooking.ctrip.com` 页面，在页面上下文里发真实前端 `fetch`，抓客服列表和会话列表。
+   `cdp` 是历史 CLI 名称；实际复用 ego-browser 的已登录 `vbooking.ctrip.com` 页面，在页面上下文里发真实前端 `fetch`，抓客服列表和会话列表。
 2. `roles select`：
    基于 `.im_archive/state.json` 选择全部或部分客服。
 3. `run export --kind links`：
@@ -37,7 +37,7 @@ Hermes Remote Debugging allocation: `9222` 固定给 Ctrip/Tripcom 主已登录�
 
 注意：
 
-- 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`，所以会话列表采集优先使用 `collect --via cdp`。
+- 纯 `requests` 的 `collect --via http` 在当前环境里可能对 `13807` 直接返回 `403`，所以会话列表采集优先使用 `collect --via cdp`（实际由 ego-browser 执行）。
 - `structured` 导出只支持 `--via http`。使用前应先通过 `discover detail-xhr` 验证并写回 `ctrip_im_detail_messages_url`。
 - 图片默认从可下载 URL 写为 `_assets/` 下的普通图片文件。禁止把 Base64 字符串保存进 JSON、sidecar 或图片文件；携程内联 Base64 图片载荷会在写出前被拒绝并清除。
 - 仅当调用方明确要求纯文本、无图片产物时，Hermes 才可追加 `--no-images`。该开关同时禁止下载并移除 JSON/Markdown 图片引用、禁止生成图片索引，且不写回配置：
@@ -45,7 +45,7 @@ Hermes Remote Debugging allocation: `9222` 固定给 Ctrip/Tripcom 主已登录�
 ```bash
 python3 -m im_archive_cli.imx_cli run export --kind structured --formats json,markdown --no-images
 ```
-- `--via cdp` 仍用于采集列表、请求发现、预检和 SingleFile 页面归档；不要再用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
+- `--via cdp` 是兼容参数名；采集列表的页面上下文由 ego-browser 执行。不要再启动 DevTools、使用 CDP/Selenium DOM 或旧详情页注入脚本解析聊天列表生成结构化 JSON/Markdown。
 
 ## 历史咨询筛选请求
 
@@ -544,29 +544,13 @@ python skills/ctrip-im-parser/scripts/scan_im.py \
 
 ## 常见故障处理
 
-### CDP proxy 不可用
+### ego-browser 不可用或页面未登录
 
-症状：`curl http://localhost:3456/targets` 失败或超时。
-
-处理：
-
-```bash
-node /Users/tashima_meru/.cc-switch/skills/web-access/scripts/check-deps.mjs
-curl -s http://localhost:3456/targets
-curl -s http://127.0.0.1:9222/json/list | python3 -m json.tool | rg 'vbooking\\.ctrip\\.com|IMExperience|webSocketDebuggerUrl'
-```
-
-如果 `cdp_proxy_base_url` 不可用但 `cdp_port` DevTools endpoint 可用，`run collect --via cdp` 会自动 fallback 到 `127.0.0.1:<cdp_port>`，并输出：
-
-```text
-cdp_proxy_base_url 不可用，已 fallback 到 127.0.0.1:9222 DevTools endpoint
-```
-
-SingleFile 归档仍需要兼容 `/new`、`/eval`、`/close` 的 proxy；direct DevTools fallback 只覆盖 `collect --via cdp` 的页面上下文 fetch。
+确认 ego lite 正在运行，并在当前携程 IM 任务空间打开 IMExperience 页面。若页面停在登录、短信/OTP、验证码或人机校验，交还任务空间给用户并等待明确确认。不要检查 `localhost:3456`、`9222` 或其他 DevTools 端口，也不要通过 Edge/Chrome 作为鉴权兜底。
 
 ### 没有 vbooking 页面
 
-症状：`CtripImCdpFetchClient` 报未找到 `vbooking.ctrip.com` 页面。
+症状：采集命令提示未找到 `vbooking.ctrip.com` 页面或登录态失效。
 
 处理：打开 IMExperience 页面并确认登录态。无人值守任务应告警，不应反复打开新页面刷屏。
 
