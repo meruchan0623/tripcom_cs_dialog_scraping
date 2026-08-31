@@ -21,7 +21,11 @@ from im_archive_cli.state import StateStore
 
 
 def _conversation_json_files(base_dir: Path) -> list[Path]:
-    return [path for path in base_dir.rglob("*.json") if not path.name.endswith(".image-index.json")]
+    return [
+        path
+        for path in base_dir.rglob("*.json")
+        if not path.name.endswith((".image-index.json", ".summary.json"))
+    ]
 
 
 class DummyLogger:

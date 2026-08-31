@@ -21,6 +21,7 @@ from .config import AppConfig, load_or_create_config, save_config
 from .detail_discovery import discover_detail_xhr_via_cdp, discover_detail_xhr_via_proxy, inspect_cdp_status, inspect_proxy_status
 from .http_export import export_structured_via_http
 from .models import RunSummary, SessionRecord
+from .run_status import CompletionStatusRun, RunMetadata
 from .selftest import run_http_export_selftest
 from .state import StateStore
 from .utils import setup_logger
@@ -165,7 +166,9 @@ def cmd_run_collect_http(
         logger.info(f"使用 HTTP 模拟前端请求采集: {start_date} -> {end_date}, page_size={size}, max_pages={max_page}")
     try:
         sessions = client.collect_sessions(start_date, end_date, page_size=size, max_pages=max_page, include_roles=include_roles)
-        StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
+        store = StateStore(Path(cfg.state_file))
+        store.set_sessions(sessions, auto_select_all=True)
+        store.set_run_metadata(RunMetadata(start_date, end_date).to_dict())
         logger.info(f"采集结束: collected={len(sessions)}")
     finally:
         if budget:
@@ -238,6 +241,77 @@ def cmd_roles_select(cfg: AppConfig, all_roles: bool, include: str | None) -> in
     return 0
 
 
+def _resolve_run_metadata(store: StateStore, start_date: str | None, end_date: str | None) -> RunMetadata:
+    explicit = RunMetadata(start_date=start_date, end_date=end_date)
+    return explicit.merged_with(RunMetadata.from_mapping(store.get_run_metadata()))
+
+
+def _cmd_run_structured_export(
+    cfg: AppConfig,
+    logger,
+    *,
+    formats: str | None,
+    via: str,
+    request_budget: int | None,
+    request_ledger: str | None,
+    concurrency: int | None,
+    request_interval_sec: float | None,
+    no_images: bool,
+    start_date: str | None,
+    end_date: str | None,
+) -> int:
+    store = StateStore(Path(cfg.state_file))
+    metadata = _resolve_run_metadata(store, start_date, end_date)
+    with CompletionStatusRun(
+        cfg.output_dir,
+        kind="structured",
+        metadata=metadata,
+        failures_file=cfg.failures_file,
+    ) as completion:
+        cfg.export_images = not no_images
+        _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
+        budget_limit = _normalize_request_budget(request_budget, "export", _request_budget_max(cfg))
+        if request_ledger and budget_limit is None:
+            raise RuntimeError("export request-ledger 必须配合 request-budget 使用")
+        if (request_budget is not None or request_ledger) and via != "http":
+            raise RuntimeError("export request-budget/request-ledger 只支持 structured --via http；SingleFile/links 路径无法精确计数")
+        if via != "http":
+            raise RuntimeError("structured export 已剥离 CDP/Selenium DOM 抓取路径，只支持 --via http")
+        sessions = store.filtered_sessions()
+        completion.total = len(sessions)
+        if not sessions:
+            raise RuntimeError("未选中任何客服角色或所选角色下无会话，请先 run collect/import links 并 roles select")
+        selected_formats = _parse_csv(formats) or ["json"]
+        invalid = [item for item in selected_formats if item not in {"json", "markdown"}]
+        if invalid:
+            raise RuntimeError(f"未知结构化导出格式: {', '.join(invalid)}")
+        budget = _make_request_budget(budget_limit, request_ledger, "export")
+        if budget and budget.remaining < len(sessions):
+            raise RuntimeError(
+                "export request-budget 剩余额度不足："
+                f"remaining={budget.remaining}, selected_sessions={len(sessions)}；"
+                "为避免中途耗尽预算，已在发出任何携程详情请求前停止"
+            )
+        client = CtripImDetailHttpClient(cfg, log=logger.info, request_budget=budget)
+        try:
+            success, failed = export_structured_via_http(client, cfg, sessions, selected_formats, logger.info)
+        finally:
+            if budget:
+                logger.info(f"携程接口请求计数: used={budget.used}, limit={budget.limit}")
+        completion.record(total=len(sessions), success=success, failed=failed)
+        summary = RunSummary(
+            kind="structured",
+            started_at=completion.started.isoformat(),
+            finished_at=_now_utc_iso(),
+            total=len(sessions),
+            success=success,
+            failed=max(failed, len(sessions) - success),
+        )
+        store.set_summary(summary)
+        logger.info(f"导出结束: kind=structured via=http success={success} failed={failed}")
+        return 0
+
+
 def cmd_run_export(
     cfg: AppConfig,
     logger,
@@ -250,7 +324,23 @@ def cmd_run_export(
     concurrency: int | None = None,
     request_interval_sec: float | None = None,
     no_images: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> int:
+    if kind == "structured":
+        return _cmd_run_structured_export(
+            cfg,
+            logger,
+            formats=formats,
+            via=via,
+            request_budget=request_budget,
+            request_ledger=request_ledger,
+            concurrency=concurrency,
+            request_interval_sec=request_interval_sec,
+            no_images=no_images,
+            start_date=start_date,
+            end_date=end_date,
+        )
     cfg.export_images = not no_images
     _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
     budget_limit = _normalize_request_budget(request_budget, "export", _request_budget_max(cfg))
@@ -272,33 +362,6 @@ def cmd_run_export(
         summary.finished_at = _now_utc_iso()
         store.set_summary(summary)
         logger.info(f"链接表导出完成: {out_path} ({len(sessions)} 条)")
-        return 0
-
-    budget = _make_request_budget(budget_limit, request_ledger, "export")
-    if kind == "structured":
-        if via != "http":
-            raise RuntimeError("structured export 已剥离 CDP/Selenium DOM 抓取路径，只支持 --via http")
-        selected_formats = _parse_csv(formats) or ["json"]
-        invalid = [f for f in selected_formats if f not in {"json", "markdown"}]
-        if invalid:
-            raise RuntimeError(f"未知结构化导出格式: {', '.join(invalid)}")
-        if budget and budget.remaining < len(sessions):
-            raise RuntimeError(
-                "export request-budget 剩余额度不足："
-                f"remaining={budget.remaining}, selected_sessions={len(sessions)}；"
-                "为避免中途耗尽预算，已在发出任何携程详情请求前停止"
-            )
-        client = CtripImDetailHttpClient(cfg, log=logger.info, request_budget=budget)
-        try:
-            success, failed = export_structured_via_http(client, cfg, sessions, selected_formats, logger.info)
-        finally:
-            if budget:
-                logger.info(f"携程接口请求计数: used={budget.used}, limit={budget.limit}")
-        summary.success = success
-        summary.failed = failed
-        summary.finished_at = _now_utc_iso()
-        store.set_summary(summary)
-        logger.info(f"导出结束: kind={kind} via=http success={success} failed={failed}")
         return 0
 
     proxy = CdpProxyClient(cfg.cdp_proxy_base_url)
@@ -354,7 +417,47 @@ def cmd_run_retry_failures(
     concurrency: int | None = None,
     request_interval_sec: float | None = None,
     no_images: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> int:
+    store = StateStore(Path(cfg.state_file))
+    metadata = _resolve_run_metadata(store, start_date, end_date)
+    with CompletionStatusRun(
+        cfg.output_dir,
+        kind="structured_retry",
+        metadata=metadata,
+        failures_file=cfg.failures_file,
+    ) as completion:
+        total, success, failed = _cmd_run_retry_failures_impl(
+            cfg,
+            logger,
+            kind,
+            formats=formats,
+            retryable_only=retryable_only,
+            session_id=session_id,
+            request_budget=request_budget,
+            request_ledger=request_ledger,
+            concurrency=concurrency,
+            request_interval_sec=request_interval_sec,
+            no_images=no_images,
+        )
+        completion.record(total=total, success=success, failed=failed)
+        return 0
+
+
+def _cmd_run_retry_failures_impl(
+    cfg: AppConfig,
+    logger,
+    kind: str,
+    formats: str | None = None,
+    retryable_only: bool = False,
+    session_id: str | None = None,
+    request_budget: int | None = None,
+    request_ledger: str | None = None,
+    concurrency: int | None = None,
+    request_interval_sec: float | None = None,
+    no_images: bool = False,
+) -> tuple[int, int, int]:
     cfg.export_images = not no_images
     _apply_runtime_request_overrides(cfg, concurrency=concurrency, request_interval_sec=request_interval_sec, structured=True)
     if kind != "structured":
@@ -366,7 +469,7 @@ def cmd_run_retry_failures(
     retry_ids = _load_retry_failure_session_ids(Path(cfg.failures_file), "structured_http", retryable_only, session_id)
     if not retry_ids:
         logger.info("没有匹配的失败项需要重跑")
-        return 0
+        return 0, 0, 0
 
     sessions_by_id = {session.session_id: session for session in StateStore(Path(cfg.state_file)).get_sessions()}
     sessions = [sessions_by_id[sid] for sid in retry_ids if sid in sessions_by_id]
@@ -395,7 +498,7 @@ def cmd_run_retry_failures(
         if budget:
             logger.info(f"携程接口请求计数: used={budget.used}, limit={budget.limit}")
     logger.info(f"失败重跑结束: kind={kind} success={success} failed={failed}")
-    return 0
+    return len(sessions), success, failed
 
 
 def cmd_import_links(cfg: AppConfig, file_path: Path, preview_only: bool, confirm: bool) -> int:
@@ -653,6 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--request-budget", type=int, default=None, help="本次 HTTP export 最多允许发出的携程接口请求数，最大 30")
     export.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
     export.add_argument("--no-images", action="store_true", help="本次运行不下载图片，也不在 JSON/Markdown/图片索引中输出图片引用")
+    export.add_argument("--start-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
+    export.add_argument("--end-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
     retry_failures = run_sub.add_parser("retry-failures")
     retry_failures.add_argument("--kind", choices=["structured"], required=True)
     retry_failures.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
@@ -663,6 +768,8 @@ def build_parser() -> argparse.ArgumentParser:
     retry_failures.add_argument("--request-budget", type=int, default=None, help="本次 retry 最多允许发出的携程接口请求数，最大 30")
     retry_failures.add_argument("--request-ledger", default=None, help="跨命令累计携程接口请求数的 JSON 账本路径")
     retry_failures.add_argument("--no-images", action="store_true", help="本次重跑不下载图片，也不输出图片引用")
+    retry_failures.add_argument("--start-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
+    retry_failures.add_argument("--end-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
 
     roles = sub.add_parser("roles")
     roles_sub = roles.add_subparsers(dest="roles_command")
@@ -760,6 +867,8 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             concurrency=args.concurrency,
             request_interval_sec=args.request_interval_sec,
             no_images=args.no_images,
+            start_date=args.start_date,
+            end_date=args.end_date,
         )
     if args.command == "run" and args.run_command == "retry-failures":
         return cmd_run_retry_failures(
@@ -774,6 +883,8 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             concurrency=args.concurrency,
             request_interval_sec=args.request_interval_sec,
             no_images=args.no_images,
+            start_date=args.start_date,
+            end_date=args.end_date,
         )
     if args.command == "roles" and args.roles_command == "list":
         return cmd_roles_list(cfg)

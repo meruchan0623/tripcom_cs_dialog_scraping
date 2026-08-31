@@ -40,6 +40,7 @@ class StateStore:
             "available_roles": [],
             "selected_roles": [],
             "last_run_summary": None,
+            "run_metadata": {},
             "updated_at": _now_utc_iso(),
         }
 
@@ -91,6 +92,15 @@ class StateStore:
         if not selected:
             return []
         return [s for s in all_sessions if s.cs_name in selected]
+
+    def set_run_metadata(self, metadata: dict[str, Any]) -> None:
+        data = self.load()
+        data["run_metadata"] = dict(metadata)
+        self.save(data)
+
+    def get_run_metadata(self) -> dict[str, Any]:
+        value = self.load().get("run_metadata")
+        return dict(value) if isinstance(value, dict) else {}
 
     def set_summary(self, summary: RunSummary) -> None:
         data = self.load()
