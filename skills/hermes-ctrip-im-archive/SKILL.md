@@ -605,3 +605,49 @@ python3 -m im_archive_cli.imx_cli state watch --once
 - 不要用纯 requests 成功与否判断整个携程登录态；以当前已登录浏览器页面为真相面。
 - 不要把 `structured` 改回 CDP/Selenium DOM 抓取；结构化 JSON/Markdown 只走已验证详情接口的 HTTP 请求。
 - 不要把 `singlefile` 改回 chromedriver 依赖；Hermes 自动主机应走 `cdp_proxy_base_url` 或兼容该接口的 proxy。
+
+## 客服 IM 差评收集与定时监控（纯 HTTP）
+
+按日期统计客服差评数量、定位差评会话并导出聊天原文：
+
+```bash
+cd /Users/tsimclaw/Develop/tripcom_cs_dialog_scraping
+python3 -m im_archive_cli.imx_cli run bad-reviews \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD \
+  --page-size 100 \
+  --max-pages 50 \
+  --request-interval-sec 0 \
+  --mark-landed \
+  --strict
+```
+
+API 真相源：
+
+1. `getAllCustomerServiceMetricCardData` 的 `session_evaluate_count` 与 `low_comment_rate` 提供总客服评价数和差评率；
+2. `getEmployeeDimMetricDetailsV3` 的 `low_comment_cnt` 提供客服维度差评数；
+3. `getSessionDimMetricDetailsV3` 定位并去重差评 `sessionId`；
+4. `getMessagesBySession` 导出差评聊天。
+
+运行时始终纯 HTTP：禁止实例化或调用 ego-browser、Chrome/Edge、CDP、Selenium、`CtripImCdpFetchClient` 或 controller；不读取或改写共享 `.im_archive/state.json`。
+
+### 增量去重落盘
+
+所有差评对话落盘必须为增量去重：
+
+- 原始 `IMChatlogExport_*.json` 绝不改名、覆盖或复制；
+- 已归档会话只新增 `<原文件>.bad-review.flag`，已存在则校验并复用；
+- 原归档缺失时才写 `bad-review-conversations/<sessionId>.bad-review.json`，同名存在时只校验不覆盖；
+- 冲突/损坏文件直接失败，不能覆盖；
+- `summary.json` 的 `landing.mode` 应为 `incremental_deduplicated_sidecar`，XLSX `差评会话` 应包含落盘状态、源路径和 marker 路径。
+
+输出位于 `<output-dir>/bad-reviews/YYYYMMDD-YYYYMMDD/`，包含 `summary.json` 和原生 XLSX。XLSX 工作表为 `差评汇总`、`客服差评统计`、`差评会话`、`聊天内容`，所有 ID、订单号、日期、数量和评分按文本写入。
+
+### 已启用 no-agent cron
+
+- `3035fcf31060`：每天上海时间 `07:00`，检查昨天差评、导出聊天并增量去重标记；无差评静默。
+- `3dffea2bbc63`：每天 `07:20` 轻量触发，脚本仅在周一或当月倒数第二天执行，投递到运营自动化执行组 `telegram:-5186417467`；范围为当月 1 日至当天，并同样导出聊天和增量去重标记。差评率 `<30%` 时只发一句总评价数/差评数/差评率且不附文件；差评率 `>=30%` 时发明确预警、当月差评对话数、聊天导出及落盘情况，并附 XLSX。周一与月倒数第二天重合时只执行一次。
+
+脚本为 `~/.hermes/scripts/trip_cs_bad_review_daily.sh`、`~/.hermes/scripts/trip_cs_bad_review_mtd_monitor.sh`，均使用 `no_agent=True`。失败通知必须是简短中文原因，不能输出凭据；其他非触发日期 stdout 为空。
+
+验收要求：`status=success`；差评数与客服/会话/唯一 session 对账；`差评数 / 总评价数` 与 API 差评率一致；所有 marker 对应源文件且 `sessionId` 一致；重复运行显示新标记为 0、已有标记递增；`.im_archive/state.json` 哈希不变。
