@@ -7,6 +7,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .bad_review_xlsx import write_bad_review_outputs
+from .bad_reviews import collect_bad_reviews, mark_landed_bad_review_sessions, validate_run_options
 from .cdp_proxy_export import CdpProxyClient, export_singlefile_via_cdp_proxy
 from .ctrip_http import (
     CtripImCdpFetchClient,
@@ -717,6 +719,48 @@ def cmd_self_test_http_export(output_dir: str, request_budget: int) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def run_bad_review_export(
+    cfg: AppConfig,
+    *,
+    start_date: str,
+    end_date: str,
+    output_dir: Path,
+    page_size: int = 100,
+    max_pages: int = 50,
+    request_interval_sec: float | None = None,
+    no_chat: bool = False,
+    mark_landed: bool = False,
+    strict: bool = False,
+) -> dict:
+    """Pure-HTTP bad-review collection and XLSX export (no browser/CDP/state)."""
+    validate_run_options(start_date, end_date, page_size, max_pages)
+    date_key = f"{start_date.replace('-', '')}-{end_date.replace('-', '')}"
+    run_dir = Path(output_dir) / "bad-reviews" / date_key
+    run_dir.mkdir(parents=True, exist_ok=True)
+    interval = request_interval_sec if request_interval_sec is not None else cfg.ctrip_request_interval_sec
+    list_client = CtripImHttpClient(cfg, request_interval_sec=interval)
+    detail_client = None if no_chat else CtripImDetailHttpClient(cfg, request_interval_sec=interval)
+    report = collect_bad_reviews(
+        list_client,
+        detail_client,
+        start_date,
+        end_date,
+        page_size=page_size,
+        max_pages=max_pages,
+        no_chat=no_chat,
+    )
+    if mark_landed:
+        mark_landed_bad_review_sessions(report, Path(cfg.output_dir), run_dir)
+    summary_path, xlsx_path = write_bad_review_outputs(run_dir, report)
+    exit_code = 1 if report["status"] == "failed" or (strict and report["status"] != "success") else 0
+    return {
+        "status": report["status"],
+        "exit_code": exit_code,
+        "summary_path": str(summary_path),
+        "xlsx_path": str(xlsx_path),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="imx", description="CDP-driven Chrome extension controller")
     parser.add_argument("--config", default="config.yaml", help="config.yaml path")
@@ -758,6 +802,17 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--no-images", action="store_true", help="本次运行不下载图片，也不在 JSON/Markdown/图片索引中输出图片引用")
     export.add_argument("--start-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
     export.add_argument("--end-date", default=None, help="可选运行元数据 YYYY-MM-DD；默认沿用最近 collect 范围")
+    bad_reviews = run_sub.add_parser("bad-reviews")
+    bad_reviews.add_argument("--start-date", default=None, help="YYYY-MM-DD，默认昨天")
+    bad_reviews.add_argument("--end-date", default=None, help="YYYY-MM-DD，默认同 start-date")
+    bad_reviews.add_argument("--output-dir", default=None, help="差评报告根目录（默认 config.output_dir）")
+    bad_reviews.add_argument("--page-size", type=int, default=100)
+    bad_reviews.add_argument("--max-pages", type=int, default=50)
+    bad_reviews.add_argument("--request-interval-sec", type=float, default=None)
+    bad_reviews.add_argument("--no-chat", action="store_true", help="跳过聊天记录详情抓取")
+    bad_reviews.add_argument("--mark-landed", action="store_true", help="为已归档差评会话创建 .bad-review.flag；缺失时将本次详情专门落盘")
+    bad_reviews.add_argument("--strict", action="store_true", help="partial/failed 时返回非零退出码")
+
     retry_failures = run_sub.add_parser("retry-failures")
     retry_failures.add_argument("--kind", choices=["structured"], required=True)
     retry_failures.add_argument("--formats", default=None, help="structured 导出格式，逗号分隔: json,markdown")
@@ -854,6 +909,26 @@ def _dispatch(args, cfg: AppConfig, logger, parser: argparse.ArgumentParser) -> 
             concurrency=args.concurrency,
             request_interval_sec=args.request_interval_sec,
         )
+    if args.command == "run" and args.run_command == "bad-reviews":
+        if not args.start_date or not args.end_date:
+            default_start, default_end = default_date_range()
+            args.start_date = args.start_date or default_start
+            args.end_date = args.end_date or default_end
+        out_dir = Path(args.output_dir) if args.output_dir else Path(cfg.output_dir)
+        result = run_bad_review_export(
+            cfg,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            output_dir=out_dir,
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+            request_interval_sec=args.request_interval_sec,
+            no_chat=args.no_chat,
+            mark_landed=args.mark_landed,
+            strict=args.strict,
+        )
+        default_exit = 1 if result["status"] == "failed" or (args.strict and result["status"] != "success") else 0
+        return int(result.get("exit_code", default_exit))
     if args.command == "run" and args.run_command == "export":
         return cmd_run_export(
             cfg,
