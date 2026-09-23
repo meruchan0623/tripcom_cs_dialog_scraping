@@ -527,6 +527,22 @@ def test_normalize_detail_messages_accepts_imvendor_messages_shape() -> None:
     assert messages[0]["timestampText"] == "2026-06-27 09:00:00"
 
 
+def test_normalize_detail_messages_uses_imvendor_subject_for_sender_identity_and_role() -> None:
+    session = SessionRecord(session_id="s1", cs_name="Alice")
+    payload = {
+        "messages": [
+            {"messageBody": "customer text", "createTime": 1785557242246, "fromJid": "123@muc.im.ctrip.com/_tiid27hgy5ra760e", "subject": "_tiid27hgy5ra760e", "msgtype": 0},
+            {"messageBody": "agent text", "createTime": 1785557749167, "fromJid": "123@muc.im.ctrip.com/csm0000006013127", "subject": "csm0000006013127", "msgtype": 0},
+            {"messageBody": "protocol event", "createTime": 1785557768812, "fromJid": "123@muc.im.ctrip.com/system", "subject": "system", "msgtype": 1022},
+        ]
+    }
+
+    messages = normalize_detail_messages(payload, session)
+
+    assert [m["senderName"] for m in messages] == ["_tiid27hgy5ra760e", "csm0000006013127", "system"]
+    assert [m["senderRole"] for m in messages] == ["buyer", "seller", "system"]
+
+
 def test_normalize_detail_messages_extracts_inline_image_attachment() -> None:
     session = SessionRecord(session_id="s1", cs_name="Alice")
     payload = {

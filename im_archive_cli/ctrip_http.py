@@ -21,6 +21,7 @@ from .state import dedupe_sessions
 
 EMPLOYEE_URL = "https://m.ctrip.com/restapi/soa2/13807/getEmployeeDimMetricDetailsV3"
 SESSION_URL = "https://m.ctrip.com/restapi/soa2/13807/getSessionDimMetricDetailsV3"
+METRIC_CARD_URL = "https://m.ctrip.com/restapi/soa2/13807/getAllCustomerServiceMetricCardData"
 VBOOKING_ORIGIN = "https://vbooking.ctrip.com"
 VBOOKING_REFERER = "https://vbooking.ctrip.com/"
 IMVENDOR_ORIGIN = "https://imvendor.ctrip.com"
@@ -46,6 +47,26 @@ class CustomerServiceAccount:
         if self.account_id and self.account_name:
             return f"{self.account_id}/{self.account_name}"
         return self.account_name or self.account_id or "Unknown"
+
+
+@dataclass(frozen=True)
+class BadReviewEmployee:
+    account_id: str
+    account_name: str
+    bad_review_count: int = 0
+
+    @property
+    def display_name(self) -> str:
+        if self.account_id and self.account_name:
+            return f"{self.account_id}/{self.account_name}"
+        return self.account_name or self.account_id or "Unknown"
+
+
+@dataclass(frozen=True)
+class BadReviewSession:
+    session_id: str
+    create_time: str = ""
+    bad_review_count: int = 0
 
 
 class CtripRequestBudgetExceeded(RuntimeError):
@@ -262,6 +283,82 @@ def build_session_body(
     }
 
 
+def build_bad_review_employee_body(
+    cfg: AppConfig,
+    start_date: str,
+    end_date: str,
+    page_no: int,
+    page_size: int,
+) -> dict[str, Any]:
+    return {
+        "metricList": ["low_comment_cnt"],
+        "searchMap": {},
+        "filterType": "1",
+        "orderColumn": "low_comment_cnt",
+        "orderType": "desc",
+        "butype": cfg.ctrip_im_butype,
+        "consultationScene": cfg.ctrip_im_consultation_scene,
+        "startDate": start_date,
+        "endDate": end_date,
+        "pageNo": int(page_no),
+        "pageSize": int(page_size),
+        "productChannel": cfg.ctrip_im_product_channel,
+        "currencyType": cfg.ctrip_im_currency_type,
+    }
+
+
+def build_bad_review_session_body(
+    cfg: AppConfig,
+    account: BadReviewEmployee,
+    start_date: str,
+    end_date: str,
+    page_no: int,
+    page_size: int,
+) -> dict[str, Any]:
+    return {
+        "metricList": ["low_comment_cnt"],
+        "searchMap": {
+            "vendor_account_id": account.account_id,
+            "vendor_account_name": account.account_name,
+        },
+        "filterType": "0",
+        "orderColumn": "session_create_time",
+        "orderType": "asc",
+        "butype": cfg.ctrip_im_butype,
+        "consultationScene": cfg.ctrip_im_consultation_scene,
+        "startDate": start_date,
+        "endDate": end_date,
+        "pageNo": int(page_no),
+        "pageSize": int(page_size),
+        "productChannel": cfg.ctrip_im_product_channel,
+    }
+
+
+def build_bad_review_metric_card_body(cfg: AppConfig, start_date: str, end_date: str) -> dict[str, Any]:
+    return {
+        "butype": cfg.ctrip_im_butype,
+        "productChannel": cfg.ctrip_im_product_channel,
+        "consultationScene": cfg.ctrip_im_consultation_scene,
+        "startDate": start_date,
+        "endDate": end_date,
+        "timeType": "0",
+        "currencyType": cfg.ctrip_im_currency_type,
+    }
+
+
+def _metric_table_rows(data: dict[str, Any], endpoint_name: str) -> tuple[list[Any], int]:
+    if "tableDataItemList" not in data or "totalNum" not in data:
+        raise RuntimeError(f"携程 {endpoint_name} 返回缺少 tableDataItemList/totalNum，不能将其视为 0 条")
+    rows = data.get("tableDataItemList")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"携程 {endpoint_name} 返回 tableDataItemList 非列表")
+    try:
+        total = int(data.get("totalNum") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"携程 {endpoint_name} 返回 totalNum 无效") from exc
+    return rows, total
+
+
 def _response_error(data: Any, text: str) -> str:
     if isinstance(data, dict):
         status = data.get("ResponseStatus") or {}
@@ -409,6 +506,120 @@ class CtripImHttpClient:
             if not rows or page_no * page_size >= total:
                 break
         return dedupe_sessions(sessions)
+
+    def list_bad_review_customer_services(
+        self,
+        start_date: str,
+        end_date: str,
+        page_size: int = 100,
+        max_pages: int = 50,
+    ) -> tuple[list[BadReviewEmployee], int]:
+        accounts: dict[str, BadReviewEmployee] = {}
+        reported_total = 0
+        seen_server_rows = 0
+        for page_no in range(1, max_pages + 1):
+            body = build_bad_review_employee_body(self.cfg, start_date, end_date, page_no, page_size)
+            data = self.post_json(EMPLOYEE_URL, body)
+            rows, total = _metric_table_rows(data, "差评客服列表")
+            reported_total = total
+            seen_server_rows += len(rows)
+            for row in rows:
+                item = _merge_dim_metric(row)
+                account_id = str(item.get("vendor_account_id") or item.get("vendor_account") or "").strip()
+                account_name = str(item.get("vendor_account_name") or item.get("name") or "").strip()
+                if not (account_id or account_name):
+                    continue
+                account = BadReviewEmployee(
+                    account_id=account_id,
+                    account_name=account_name,
+                    bad_review_count=_first_int(item, ("low_comment_cnt",)),
+                )
+                accounts.setdefault(account_id or account_name, account)
+            if seen_server_rows >= total:
+                break
+            if not rows:
+                raise RuntimeError(f"携程差评客服列表分页提前为空：seen={seen_server_rows}, total={total}")
+        if seen_server_rows < reported_total:
+            raise RuntimeError(
+                f"携程差评客服列表分页未完成：max_pages={max_pages}, seen={seen_server_rows}, total={reported_total}"
+            )
+        return list(accounts.values()), reported_total
+
+    def get_bad_review_period_metrics(self, start_date: str, end_date: str) -> dict[str, Any]:
+        body = build_bad_review_metric_card_body(self.cfg, start_date, end_date)
+        data = self.post_json(METRIC_CARD_URL, body)
+        rows = data.get("comment")
+        if not isinstance(rows, list):
+            raise RuntimeError("携程客服评价指标接口返回缺少 comment 列表，不能将其视为 0 条")
+        values_by_metric: dict[str, Any] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metric = str(row.get("metric") or "").strip()
+            values = row.get("values")
+            if metric and isinstance(values, dict) and "non" in values:
+                values_by_metric[metric] = values.get("non")
+        required = ("session_evaluate_count", "low_comment_rate")
+        missing = [name for name in required if name not in values_by_metric]
+        if missing:
+            raise RuntimeError(f"携程客服评价指标接口缺少字段：{','.join(missing)}")
+        try:
+            total_float = float(values_by_metric["session_evaluate_count"])
+            bad_review_rate = float(values_by_metric["low_comment_rate"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("携程客服评价指标接口返回总评价数/差评率无效") from exc
+        total_evaluations = int(round(total_float))
+        if total_evaluations < 0 or abs(total_float - total_evaluations) > 1e-6:
+            raise RuntimeError("携程客服评价指标接口返回总评价数不是非负整数")
+        if not 0.0 <= bad_review_rate <= 1.0:
+            raise RuntimeError("携程客服评价指标接口返回差评率不在 0-1 范围")
+        return {
+            "total_evaluations": total_evaluations,
+            "bad_review_rate": bad_review_rate,
+        }
+
+    def list_bad_review_sessions_for_account(
+        self,
+        account: BadReviewEmployee,
+        start_date: str,
+        end_date: str,
+        page_size: int = 100,
+        max_pages: int = 50,
+    ) -> tuple[list[BadReviewSession], int]:
+        sessions: dict[str, BadReviewSession] = {}
+        reported_total = 0
+        seen_server_rows = 0
+        for page_no in range(1, max_pages + 1):
+            body = build_bad_review_session_body(self.cfg, account, start_date, end_date, page_no, page_size)
+            data = self.post_json(SESSION_URL, body)
+            rows, total = _metric_table_rows(data, "差评会话列表")
+            reported_total = total
+            seen_server_rows += len(rows)
+            for row in rows:
+                item = _merge_dim_metric(row)
+                session_id = str(item.get("session_id") or "").strip()
+                if not session_id:
+                    continue
+                sessions.setdefault(
+                    session_id,
+                    BadReviewSession(
+                        session_id=session_id,
+                        create_time=str(item.get("session_create_time") or ""),
+                        bad_review_count=_first_int(item, ("low_comment_cnt",)),
+                    ),
+                )
+            if seen_server_rows >= total:
+                break
+            if not rows:
+                raise RuntimeError(
+                    f"携程差评会话列表分页提前为空：account={account.account_id}, seen={seen_server_rows}, total={total}"
+                )
+        if seen_server_rows < reported_total:
+            raise RuntimeError(
+                f"携程差评会话列表分页未完成：account={account.account_id}, max_pages={max_pages}, "
+                f"seen={seen_server_rows}, total={reported_total}"
+            )
+        return list(sessions.values()), reported_total
 
     def collect_sessions(
         self,
@@ -565,15 +776,13 @@ class CtripImDetailHttpClient(CtripImHttpClient):
             url,
             verified_source=str(getattr(self.cfg, "ctrip_im_detail_verified_source", "") or ""),
         )
+        # Browser-captured getMessagesBySession has no paging fields and returns the
+        # complete conversation in one response. pageNo/pageSize are ignored by the
+        # service, so retrying a synthetic page loop would duplicate messages.
         size = int(page_size or self.cfg.ctrip_im_detail_page_size or 100)
-        messages: list[dict[str, Any]] = []
-        for page_no in range(1, max_pages + 1):
-            body = build_detail_body(self.cfg, session, page_no, size)
-            data = self.post_json(url, body)
-            page_messages = normalize_detail_messages(data, session)
-            messages.extend(page_messages)
-            if not _detail_has_next_page(data, page_no, size, len(page_messages), len(messages)):
-                break
+        body = build_detail_body(self.cfg, session, 1, size)
+        data = self.post_json(url, body)
+        messages = normalize_detail_messages(data, session)
         return {
             "sessionId": session.session_id,
             "csName": session.cs_name,
@@ -623,20 +832,27 @@ def normalize_detail_messages(data: Any, session: SessionRecord) -> list[dict[st
             (
                 "text",
                 "content",
+                "title",
+                "msg",
                 "message",
                 "messageBody",
-                "msg",
                 "msgContent",
                 "messageContent",
                 "contentText",
                 "body",
             ),
         )
+        ext = row.get("ext") if isinstance(row.get("ext"), dict) else {}
+        if not text:
+            text = _first_str(ext, ("answer", "content"))
         inline_image = extract_inline_image_attachment(message_body)
         if inline_image is not None:
             text = "[图片]"
-        sender_name = _first_str(row, ("senderName", "sendName", "fromName", "nickName", "userName", "name"))
-        sender_role = _normalize_sender_role(_first_str(row, ("senderRole", "role", "senderType", "fromType", "source")))
+        sender_name = _sender_identity(row)
+        sender_role = _normalize_sender_role(
+            _first_str(row, ("senderRole", "role", "senderType", "fromType", "source")),
+            sender_name,
+        )
         timestamp = _first_str(row, ("timestampText", "sendTime", "messageTime", "createTime", "time", "createdAt"))
         attachments = _extract_attachments(row)
         if inline_image is not None:
@@ -652,7 +868,9 @@ def normalize_detail_messages(data: Any, session: SessionRecord) -> list[dict[st
                 "senderRole": sender_role,
                 "senderName": sender_name,
                 "messageType": message_type,
+                "action": _first_str(row, ("action", "rawAction", "messageAction", "msgAction")),
                 "text": text,
+                "ext": ext,
                 "rawHtml": _first_str(row, ("rawHtml", "html", "contentHtml")),
                 "attachments": attachments,
             }
@@ -708,19 +926,6 @@ def _looks_like_message(item: Any) -> bool:
     return bool(keys & signal_keys)
 
 
-def _detail_has_next_page(data: Any, page_no: int, page_size: int, page_count: int, total_seen: int) -> bool:
-    if page_count <= 0:
-        return False
-    if isinstance(data, dict):
-        for key in ("hasNext", "hasMore", "has_next", "more"):
-            if key in data:
-                return bool(data.get(key))
-        total = _first_int(data, ("total", "totalNum", "totalCount", "count"))
-        if total:
-            return total_seen < total
-    return page_count >= page_size
-
-
 def _renumber_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for index, message in enumerate(messages, start=1):
@@ -743,7 +948,17 @@ def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def _normalize_sender_role(value: str) -> str:
+def _sender_identity(row: dict[str, Any]) -> str:
+    direct = _first_str(row, ("senderName", "sendName", "fromName", "nickName", "userName", "name", "subject"))
+    if direct:
+        return direct
+    from_jid = _first_str(row, ("fromJid", "from_jid", "jid"))
+    if "/" in from_jid:
+        return from_jid.rsplit("/", 1)[-1].strip()
+    return from_jid
+
+
+def _normalize_sender_role(value: str, sender_identity: str = "") -> str:
     text = value.lower()
     if any(x in text for x in ("seller", "service", "staff", "agent", "vendor", "客服", "商家")):
         return "seller"
@@ -751,6 +966,13 @@ def _normalize_sender_role(value: str) -> str:
         return "buyer"
     if any(x in text for x in ("system", "notice", "系统")):
         return "system"
+    identity = sender_identity.strip().lower()
+    if identity == "system" or identity.startswith("_imbot"):
+        return "system"
+    if identity.startswith(("_ti", "trip_")):
+        return "buyer"
+    if identity.startswith(("csm", "_imkf", "vbk_")):
+        return "seller"
     return value or "unknown"
 
 

@@ -28,7 +28,7 @@ ctrip_im_detail_extra_body:
       value: ''
     - name: locale
       value: zh-CN
-ctrip_im_detail_page_size: 100
+ctrip_im_detail_page_size: 1000
 ctrip_im_detail_verified_source: browser_detail_xhr
 ctrip_im_detail_verified_url: ''
 ctrip_im_detail_verified_at: '2026-06-30T17:16:29.564483+00:00'
