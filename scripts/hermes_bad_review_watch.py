@@ -11,6 +11,18 @@ from pathlib import Path
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
+_REPO_DIR = Path(__file__).resolve().parents[1]
+# This watcher is invoked by absolute path from outside the repository.  Make
+# the checkout win over any similarly named package installed for another job.
+_repo_source_root = str(_REPO_DIR)
+sys.path[:] = [path for path in sys.path if path != _repo_source_root]
+sys.path.insert(0, _repo_source_root)
+
+import yaml
+
+from im_archive_cli.config import AppConfig
+from im_archive_cli.ctrip_http import CtripImHttpClient
+
 _SECRET_RE = re.compile(r"(?i)\b(cookie|authorization|cticket|token|password|secret|sid)\b\s*[:=]\s*[^\s,;]+")
 
 
@@ -79,6 +91,35 @@ def _truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _current_month_metrics(env: Mapping[str, str], repo_dir: Path) -> tuple[str, str, int, float]:
+    """Fetch only the metric card for the natural month containing today."""
+    today = _today(env)
+    start_date = today.replace(day=1).isoformat()
+    end_date = today.isoformat()
+    config_path = repo_dir / "config.yaml"
+    if not config_path.is_file():
+        raise RuntimeError("未找到 config.yaml，无法读取自然月指标配置")
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(config_data, dict):
+        raise RuntimeError("config.yaml 格式无效，无法读取自然月指标配置")
+    cfg = AppConfig.from_mapping(config_data)
+    metrics = CtripImHttpClient(cfg, request_interval_sec=0).get_bad_review_period_metrics(start_date, end_date)
+    return start_date, end_date, int(metrics["total_evaluations"]), float(metrics["bad_review_rate"])
+
+
+def _print_current_month_metrics(env: Mapping[str, str], repo_dir: Path) -> int:
+    today = _today(env)
+    start_date = today.replace(day=1).isoformat()
+    end_date = today.isoformat()
+    try:
+        start_date, end_date, total, rate = _current_month_metrics(env, repo_dir)
+    except Exception as exc:  # The daily result must remain visible if this extra call fails.
+        print(f"携程客服自然月指标：{start_date}至{end_date}暂不可用，原因：{_sanitize(exc)}。")
+        return 1
+    print(f"携程客服自然月指标：{start_date}至{end_date}，总客服评价{total}，差评率{rate * 100:.2f}%。")
+    return 0
 
 
 def main(environ: Mapping[str, str] | None = None) -> int:
@@ -177,6 +218,8 @@ def main(environ: Mapping[str, str] | None = None) -> int:
             )
             text = f"携程客服差评预警：{start_date}共{count}条；{landing_text}。"
             print(f"{text}\nMEDIA:{xlsx_path}")
+        if _truthy(env.get("BAD_REVIEW_INCLUDE_MTD_METRICS")):
+            return _print_current_month_metrics(env, repo_dir)
         return 0
     except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         print(f"携程客服差评预警执行失败了，原因：{_sanitize(exc)}")
