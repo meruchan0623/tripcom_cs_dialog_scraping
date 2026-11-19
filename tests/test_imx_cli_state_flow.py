@@ -261,6 +261,41 @@ def test_collect_cli_overrides_request_interval(tmp_path, monkeypatch) -> None:
     assert captured == {"interval": 2.5}
 
 
+def test_zero_session_collect_preserves_prior_state_and_run_metadata(tmp_path, monkeypatch) -> None:
+    cfg = make_cfg(tmp_path)
+    seed_state(cfg)
+    store = StateStore(Path(cfg.state_file))
+    store.set_run_metadata({"start_date": "2026-11-08", "end_date": "2026-11-08"})
+    before = store.load()
+    logger = DummyLogger()
+
+    class EmptyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def collect_sessions(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(imx_cli, "CtripImHttpClient", EmptyClient)
+
+    assert cmd_run_collect_http(
+        cfg,
+        logger,
+        page_size=100,
+        max_pages=50,
+        start_date="2026-11-09",
+        end_date="2026-11-09",
+        include=None,
+    ) == 0
+
+    after = store.load()
+    assert after["collected_sessions"] == before["collected_sessions"]
+    assert after["available_roles"] == before["available_roles"]
+    assert after["selected_roles"] == before["selected_roles"]
+    assert after["run_metadata"] == before["run_metadata"]
+    assert logger.lines[-1] == "采集结束: collected=0"
+
+
 def test_main_collect_cdp_reports_proxy_and_devtools_discovery_failure_without_traceback(
     tmp_path,
     monkeypatch,

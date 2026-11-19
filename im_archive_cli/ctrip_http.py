@@ -459,12 +459,15 @@ class CtripImHttpClient:
 
     def list_customer_services(self, start_date: str, end_date: str, page_size: int = 100) -> list[CustomerServiceAccount]:
         accounts: list[CustomerServiceAccount] = []
+        seen_server_rows = 0
+        reported_total = 0
         page_no = 1
         while True:
             body = build_employee_body(self.cfg, start_date, end_date, page_no, page_size)
             data = self.post_json(EMPLOYEE_URL, body)
-            rows = data.get("tableDataItemList") or []
-            total = int(data.get("totalNum") or len(rows) or 0)
+            rows, total = _metric_table_rows(data, "客服列表")
+            reported_total = total
+            seen_server_rows += len(rows)
             for row in rows:
                 item = _merge_dim_metric(row)
                 account_id = str(item.get("vendor_account_id") or item.get("vendor_account") or "").strip()
@@ -472,9 +475,13 @@ class CtripImHttpClient:
                 count = _first_int(item, ("session_cnt", "session_count", "consult_session_cnt", "im_session_cnt"))
                 if account_id or account_name:
                     accounts.append(CustomerServiceAccount(account_id, account_name, count))
-            if not rows or page_no * page_size >= total:
+            if seen_server_rows >= total:
                 break
+            if not rows:
+                raise RuntimeError(f"携程客服列表分页提前为空：seen={seen_server_rows}, total={total}")
             page_no += 1
+        if seen_server_rows < reported_total:
+            raise RuntimeError(f"携程客服列表分页未完成：seen={seen_server_rows}, total={reported_total}")
         return accounts
 
     def list_sessions_for_account(
@@ -486,11 +493,14 @@ class CtripImHttpClient:
         max_pages: int = 50,
     ) -> list[SessionRecord]:
         sessions: list[SessionRecord] = []
+        seen_server_rows = 0
+        reported_total = 0
         for page_no in range(1, max_pages + 1):
             body = build_session_body(self.cfg, account, start_date, end_date, page_no, page_size)
             data = self.post_json(SESSION_URL, body)
-            rows = data.get("tableDataItemList") or []
-            total = int(data.get("totalNum") or len(rows) or 0)
+            rows, total = _metric_table_rows(data, "会话列表")
+            reported_total = total
+            seen_server_rows += len(rows)
             for row in rows:
                 item = _merge_dim_metric(row)
                 session_id = str(item.get("session_id") or "").strip()
@@ -503,8 +513,17 @@ class CtripImHttpClient:
                         create_time=str(item.get("session_create_time") or ""),
                     ).normalized()
                 )
-            if not rows or page_no * page_size >= total:
+            if seen_server_rows >= total:
                 break
+            if not rows:
+                raise RuntimeError(
+                    f"携程会话列表分页提前为空：account={account.account_id}, seen={seen_server_rows}, total={total}"
+                )
+        if seen_server_rows < reported_total:
+            raise RuntimeError(
+                f"携程会话列表分页未完成：account={account.account_id}, max_pages={max_pages}, "
+                f"seen={seen_server_rows}, total={reported_total}"
+            )
         return dedupe_sessions(sessions)
 
     def list_bad_review_customer_services(

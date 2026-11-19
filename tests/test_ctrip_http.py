@@ -175,6 +175,48 @@ def test_http_client_collects_sessions_from_stubbed_responses(monkeypatch: pytes
     assert sessions[0].cs_name == "vbk_1/Alice"
 
 
+@pytest.mark.parametrize("method", ["list_customer_services", "list_sessions_for_account"])
+def test_regular_metric_lists_reject_success_response_missing_table_fields(tmp_path, method) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=bar", encoding="utf-8")
+    cfg = AppConfig(ctrip_cookie_header_file=str(cookie_file), ctrip_auth_json=str(tmp_path / "missing.json"))
+
+    class FakeClient(CtripImHttpClient):
+        def post_json(self, url: str, body: dict, timeout: int = 45) -> dict:
+            return {"ResponseStatus": {"Ack": "Success"}}
+
+    client = FakeClient(cfg)
+    with pytest.raises(RuntimeError, match="tableDataItemList/totalNum"):
+        if method == "list_customer_services":
+            client.list_customer_services("2026-11-09", "2026-11-09")
+        else:
+            client.list_sessions_for_account(CustomerServiceAccount("vbk_1", "Alice"), "2026-11-09", "2026-11-09")
+
+
+def test_regular_session_list_rejects_incomplete_pagination_at_max_pages(tmp_path) -> None:
+    cookie_file = tmp_path / "cookie.txt"
+    cookie_file.write_text("foo=bar", encoding="utf-8")
+    cfg = AppConfig(ctrip_cookie_header_file=str(cookie_file), ctrip_auth_json=str(tmp_path / "missing.json"))
+
+    class FakeClient(CtripImHttpClient):
+        def post_json(self, url: str, body: dict, timeout: int = 45) -> dict:
+            return {
+                "ResponseStatus": {"Ack": "Success"},
+                "totalNum": 3,
+                "tableDataItemList": [{"dimMap": {"session_id": f"s{body['pageNo']}"}}],
+            }
+
+    client = FakeClient(cfg)
+    with pytest.raises(RuntimeError, match="分页未完成.*max_pages=2.*seen=2.*total=3"):
+        client.list_sessions_for_account(
+            CustomerServiceAccount("vbk_1", "Alice"),
+            "2026-11-09",
+            "2026-11-09",
+            page_size=1,
+            max_pages=2,
+        )
+
+
 def test_browser_fetch_client_opens_vbooking_with_ego_browser(monkeypatch: pytest.MonkeyPatch) -> None:
     opened: list[str] = []
     monkeypatch.setattr(ctrip_http.WebDriver, "__init__", lambda self: None)

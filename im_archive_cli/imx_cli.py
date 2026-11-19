@@ -169,8 +169,11 @@ def cmd_run_collect_http(
     try:
         sessions = client.collect_sessions(start_date, end_date, page_size=size, max_pages=max_page, include_roles=include_roles)
         store = StateStore(Path(cfg.state_file))
-        store.set_sessions(sessions, auto_select_all=True)
-        store.set_run_metadata(RunMetadata(start_date, end_date).to_dict())
+        if sessions:
+            store.set_sessions(sessions, auto_select_all=True)
+            store.set_run_metadata(RunMetadata(start_date, end_date).to_dict())
+        else:
+            logger.info("采集返回 0 会话：保留现有 state 和 run metadata")
         logger.info(f"采集结束: collected={len(sessions)}")
     finally:
         if budget:
@@ -208,8 +211,11 @@ def cmd_run_collect_browser(cfg: AppConfig, logger, page_size: int | None, max_p
         raw_sessions = collected.get("sessions") or []
     if isinstance(raw_sessions, list):
         sessions = [SessionRecord.from_dict(item) for item in raw_sessions if isinstance(item, dict)]
-        StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
-        logger.info(f"已同步插件采集结果到 Python state: {len(sessions)} 条")
+        if sessions:
+            StateStore(Path(cfg.state_file)).set_sessions(sessions, auto_select_all=True)
+            logger.info(f"已同步插件采集结果到 Python state: {len(sessions)} 条")
+        else:
+            logger.info("插件采集返回 0 会话：保留现有 Python state")
     logger.info(f"采集结束: phase={final_state.get('phase')} collected={final_state.get('collectedCount')}")
     return 0
 
